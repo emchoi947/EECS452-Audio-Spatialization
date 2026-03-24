@@ -53,7 +53,7 @@ float gainR_global = 1.0f;
 float gainL        = 1.0f;
 float gainR        = 1.0f;
 float r_angle, l_angle;
-
+float angle;
 
 String serialBuf = "";
 bool serialReady = false;
@@ -82,16 +82,26 @@ int ringIndex(int pos) {
   return pos;
 }
 
-void angle_gain(float angleL, float angleR, float &gL, float &gR) {
-  float angle_dif = (angleR - angleL) / 2.0f;
-  float panL = 0.5f * (1.0f - sinf(angle_dif));
-  float panR = 0.5f * (1.0f + sinf(angle_dif));
+void angle_gain(float angle_diff, float &gL, float &gR) {
+  float rad_angle = angle_diff * PI / 180.0f;
+  float panL = 0.5f * (1.0f + sinf(rad_angle));
+  float panR = 0.5f * (1.0f - sinf(rad_angle));
   gL = powf(panL, 0.5f);
   gR = powf(panR, 0.5f);
 }
 
-void updateSpatialParams(float left_dist, float right_dist) {
-  float itd = (right_dist - left_dist) / speed_of_sound * 20.0f;
+void updateSpatialParams(float angle_diff) {
+  float itd_max = (head_width) / speed_of_sound * 20.0f;
+
+  if (angle_diff < -89.5f && angle_diff > -90.5f) angle_diff = -89.5f;
+  if (angle_diff >  89.5f && angle_diff < 90.5f) angle_diff =  89.5f;
+  
+  if (abs(angle_diff) > 90.0f) {
+    angle_diff = angle_diff + 90.0f * (angle_diff / abs(angle_diff)); // Wrap to [-90, 90]
+  }
+
+  float itd = itd_max * (angle_diff * 10 / 9) / 100;
+  if (abs(itd) > itd_max) itd = itd / (itd/itd_max) ; // Clamp ITD to max by scaling it back proportionally
   int itd_samples = (int)roundf(itd * sample_rate);
 
   if (itd_samples > 0) {
@@ -102,13 +112,11 @@ void updateSpatialParams(float left_dist, float right_dist) {
     delayR_samples = abs(itd_samples);
   }
 
-  r_angle = acosf((head_width * head_width + right_dist * right_dist - left_dist * left_dist) / (2 * head_width * right_dist));
-  l_angle = acosf((head_width * head_width + left_dist * left_dist - right_dist * right_dist) / (2 * head_width * left_dist));
-  angle_gain(l_angle, r_angle, gainL, gainR);
+  angle_gain(angle_diff, gainL, gainR);
 
-  float ild = 20.0f * log10f(right_dist / left_dist);
-  gainL_global = pow(powf(10.0f,  ild / 20.0f), 5);
-  gainR_global = pow(powf(10.0f, -ild / 20.0f), 5);
+  float ild = 20.0f * log10f((angle_diff+90.0f) / 90.0f + 1e-3f); // Avoid log(0) with small offset
+  gainL_global = pow(powf(10.0f,  ild / 20.0f), 0.5);
+  gainR_global = pow(powf(10.0f, -ild / 20.0f), 0.5);
 
   if(gainL_global >2) gainL_global = 2;
   if(gainR_global >2) gainR_global = 2;
@@ -129,14 +137,7 @@ void updateSpatialParams(float left_dist, float right_dist) {
   Serial.print(gainR_global);
   Serial.print(", GainR_Angle: ");
   Serial.println(gainR);
-  Serial.print("Angles (degrees) - Left: ");
-  Serial.print(l_angle * 180.0f / M_PI);
-  Serial.print(", Right: ");
-  Serial.print(r_angle * 180.0f / M_PI);
-  Serial.print("Left_dist: ");
-  Serial.print(left_dist);
-  Serial.print(", Right_dist: ");
-  Serial.println(right_dist);
+
 
 }
 
@@ -251,14 +252,11 @@ void loop() {
 
   // Only process the command once the full line has arrived
   if (serialReady) {
-    if (serialBuf.startsWith("pos")) {
-      sscanf(serialBuf.c_str(), "pos %f %f", &transmit_x, &transmit_y);
-      Serial.print("Updated position: ");
-      Serial.print(transmit_x); Serial.print(", "); Serial.println(transmit_y);
-
-      float ld = sqrtf(powf(transmit_x - left_ear_x,  2) + powf(transmit_y, 2));
-      float rd = sqrtf(powf(transmit_x - right_ear_x, 2) + powf(transmit_y, 2));
-      updateSpatialParams(ld, rd);
+    if (serialBuf.startsWith("angle")) {
+      sscanf(serialBuf.c_str(), "angle %f", &angle);
+      Serial.print("Updated angle: ");
+      Serial.println(angle);
+      updateSpatialParams(angle);
     }
     serialBuf  = "";
     serialReady = false;
