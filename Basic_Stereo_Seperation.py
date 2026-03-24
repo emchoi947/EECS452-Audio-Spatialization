@@ -49,9 +49,9 @@ def basic_stereo_separation(signal, trans_x, trans_y):
 
     # 2 different methods to calculate the separated audio signal
    
-    output_signal= apply_itd_ild(signal, ITD_samples, ILD) #Delay based seperation
+    #output_signal= apply_itd_ild(signal, ITD_samples, ILD) #Delay based seperation
 
-    #output_signal = apply_separation(signal, separation_factor) # gain based seperation
+    output_signal = apply_separation(signal, separation_factor) # gain based seperation
    
     return output_signal
 
@@ -60,6 +60,7 @@ def apply_separation(signal, separation_factor):
     output_signal = np.zeros_like(signal)
     output_signal[:, 0] = signal[:, 0] * (1 + separation_factor) / 2  # Left channel
     output_signal[:, 1] = signal[:, 1] * (1 - separation_factor) / 2  # Right channel
+    print(f"Separation Factor: {separation_factor}")
     return output_signal
 
 

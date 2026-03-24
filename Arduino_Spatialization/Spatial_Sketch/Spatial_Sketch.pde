@@ -1,127 +1,267 @@
-#include <Arduino.h>
-#include <math.h>
-#include <vector>
+#include <Audio.h>
+#include <Wire.h>
+#include <SD.h>
+#include <SPI.h>
+#include <SerialFlash.h>
+#include "low_pass.h"
+#include "band_pass.h"
 
-const float head_width = 0.15; // meters
+#define LED 13
+
+// --- Swap AudioInputI2S for two queues (one per channel) ---
+AudioInputI2S         audioInput;       // replaces sine wave
+AudioRecordQueue      recordQueue;      // lets us pull samples in loop()
+
+AudioPlayQueue        queueL;
+AudioPlayQueue        queueR;
+AudioFilterFIR        myFilterL;
+AudioFilterFIR        myFilterR;
+AudioOutputI2S        audioOutput;
+AudioControlSGTL5000  audioShield;
+
+// Feed queues into filters, filters into output
+AudioConnection c0(audioInput,  0, recordQueue, 0);
+
+
+AudioConnection c1(queueL,    0, myFilterL, 0);
+AudioConnection c2(queueR,    0, myFilterR, 0);
+AudioConnection c3(myFilterL, 0, audioOutput, 0);
+AudioConnection c4(myFilterR, 0, audioOutput, 1);
+
+// --- Your spatialization globals ---
+// --- Spatialization globals (unchanged) ---
+const float head_width     = 0.15;
 const float speed_of_sound = 343.0;
-const int sample_rate = 44100;
+const int   sample_rate    = 44100;
 
-float left_ear_x = -head_width / 2.0;
-float right_ear_x = head_width / 2.0;
+float left_ear_x  = -head_width / 2.0;
+float right_ear_x =  head_width / 2.0;
+float transmit_x  = 0.0;
+float transmit_y  = 5.0;
 
-float transmit_x = 0.0;
-float transmit_y = 5.0;
+const int MAX_DELAY_SAMPLES = 100;
+const int RING_SIZE = AUDIO_BLOCK_SAMPLES + MAX_DELAY_SAMPLES;
 
-// 1 second stereo buffer
-std::vector<std::vector<int>> audio_buffer(2, std::vector<int>(sample_rate/4, 0)); // 0.25 second buffer for testing
+int16_t ringL[RING_SIZE];
+int16_t ringR[RING_SIZE];
 
-void setup() {
+int write_pos      = 0;
+int delayL_samples = 0;
+int delayR_samples = 0;
+float gainL_global = 1.0f;
+float gainR_global = 1.0f;
+float gainL        = 1.0f;
+float gainR        = 1.0f;
+float r_angle, l_angle;
 
-  Serial.begin(9600);
 
-  // Generate 440 Hz tone
-  for (int i = 0; i < sample_rate; i++) {
-    int sample = (int)(32767 * sin(2 * M_PI * 440.0 * i / sample_rate));
-    audio_buffer[0][i] = sample;
-    audio_buffer[1][i] = sample;
-  }
-}
+String serialBuf = "";
+bool serialReady = false;
 
+int start_idx = 1;
+struct fir_filter {
+  short *coeffs;
+  short  num_coeffs;
+};
+struct fir_filter fir_list[] = {
+  {LP,   100},
+  {BP,   100},
+  {NULL,   0}
+};
+
+// --- Helpers (unchanged) ---
 int clamp16(int v) {
-  if (v > 32767) return 32767;
+  if (v >  32767) return  32767;
   if (v < -32768) return -32768;
   return v;
 }
 
-std::vector<std::vector<int>> update(
-  float left_ear_distance,
-  float right_ear_distance,
-  const std::vector<std::vector<int>>& audio_buffer
-) {
+int ringIndex(int pos) {
+  pos = pos % RING_SIZE;
+  if (pos < 0) pos += RING_SIZE;
+  return pos;
+}
 
-  float itd = (right_ear_distance - left_ear_distance) / speed_of_sound;
+void angle_gain(float angleL, float angleR, float &gL, float &gR) {
+  float angle_dif = (angleR - angleL) / 2.0f;
+  float panL = 0.5f * (1.0f - sinf(angle_dif));
+  float panR = 0.5f * (1.0f + sinf(angle_dif));
+  gL = powf(panL, 0.5f);
+  gR = powf(panR, 0.5f);
+}
 
-  // exaggerate effect
-  itd *= 10;
-
-  int itd_samples = round(itd * sample_rate);
-  int delay = abs(itd_samples);
-
-  float ild = 20.0 * log10(right_ear_distance / left_ear_distance);
-
-  float gainL = pow(10, -ild / 20.0);
-  float gainR = pow(10, ild / 20.0);
-
-  int buf_size = audio_buffer[0].size();
-
-  std::vector<std::vector<int>> processed_buffer(
-      2, std::vector<int>(buf_size + delay, 0));
+void updateSpatialParams(float left_dist, float right_dist) {
+  float itd = (right_dist - left_dist) / speed_of_sound * 20.0f;
+  int itd_samples = (int)roundf(itd * sample_rate);
 
   if (itd_samples > 0) {
-
-    // delay right ear
-    for (int i = 0; i < buf_size; i++) {
-
-      int idx = i + delay;
-
-      if (idx < processed_buffer[1].size())
-        processed_buffer[1][idx] = audio_buffer[1][i];
-
-      processed_buffer[0][i] = audio_buffer[0][i];
-    }
-
+    delayL_samples = itd_samples;
+    delayR_samples = 0;
   } else {
-
-    // delay left ear
-    for (int i = 0; i < buf_size; i++) {
-
-      int idx = i + delay;
-
-      if (idx < processed_buffer[0].size())
-        processed_buffer[0][idx] = audio_buffer[0][i];
-
-      processed_buffer[1][i] = audio_buffer[1][i];
-    }
+    delayL_samples = 0;
+    delayR_samples = abs(itd_samples);
   }
 
-  // apply ILD gain and clamp
-  for (int i = 0; i < processed_buffer[0].size(); i++) {
+  r_angle = acosf((head_width * head_width + right_dist * right_dist - left_dist * left_dist) / (2 * head_width * right_dist));
+  l_angle = acosf((head_width * head_width + left_dist * left_dist - right_dist * right_dist) / (2 * head_width * left_dist));
+  angle_gain(l_angle, r_angle, gainL, gainR);
 
-    int L = processed_buffer[0][i] * gainL;
-    int R = processed_buffer[1][i] * gainR;
+  float ild = 20.0f * log10f(right_dist / left_dist);
+  gainL_global = pow(powf(10.0f,  ild / 20.0f), 5);
+  gainR_global = pow(powf(10.0f, -ild / 20.0f), 5);
 
-    processed_buffer[0][i] = clamp16(L);
-    processed_buffer[1][i] = clamp16(R);
-  }
+  if(gainL_global >2) gainL_global = 2;
+  if(gainR_global >2) gainR_global = 2;
 
-  return processed_buffer;
+  Serial.print("ITD (samples): "); Serial.print(itd_samples);
+  Serial.print(", ILD (dB): ");    Serial.println(ild);
+
+  // Printing debug statemenets to serial
+  Serial.print("Updated spatial params - ITD (samples): ");
+  Serial.print(itd_samples);
+  Serial.print(", ILD (dB): ");
+  Serial.print(ild);
+  Serial.print(", \n GainL: ");
+  Serial.print(gainL_global);
+  Serial.print(", GainL_Angle: ");
+  Serial.print(gainL);
+  Serial.print(", GainR: ");
+  Serial.print(gainR_global);
+  Serial.print(", GainR_Angle: ");
+  Serial.println(gainR);
+  Serial.print("Angles (degrees) - Left: ");
+  Serial.print(l_angle * 180.0f / M_PI);
+  Serial.print(", Right: ");
+  Serial.print(r_angle * 180.0f / M_PI);
+  Serial.print("Left_dist: ");
+  Serial.print(left_dist);
+  Serial.print(", Right_dist: ");
+  Serial.println(right_dist);
+
 }
+
+
+/*
+void applySpatialisation(float left_dist, float right_dist) {
+  float itd = (right_dist - left_dist) / speed_of_sound * 10.0f;
+  int   itd_samples = (int)roundf(itd * sample_rate);
+  int   delay = abs(itd_samples);
+
+  float ild   = 20.0f * log10f(right_dist / left_dist);
+  float gainL = powf(10.0f, -ild / 20.0f);
+  float gainR = powf(10.0f,  ild / 20.0f);
+
+  if (itd_samples > 0) {
+    for (int i = pending_buf_size - 1; i >= 0; i--) {
+      int dst = i + delay;
+      writeR[dst] = (dst < pending_buf_size + MAX_DELAY) ? writeR[i] : 0;
+    }
+    for (int i = 0; i < delay; i++) writeR[i] = 0;
+  } else if (itd_samples < 0) {
+    for (int i = pending_buf_size - 1; i >= 0; i--) {
+      int dst = i + delay;
+      writeL[dst] = (dst < pending_buf_size + MAX_DELAY) ? writeL[i] : 0;
+    }
+    for (int i = 0; i < delay; i++) writeL[i] = 0;
+  }
+
+  for (int i = 0; i < pending_buf_size + delay; i++) {
+    writeL[i] = clamp16((int)(writeL[i] * gainL));
+    writeR[i] = clamp16((int)(writeR[i] * gainR));
+  }
+
+
+
+  pending_buf_size += delay;
+
+  // Signal the audio feed to swap at the next clean loop boundary
+  swap_requested = true;
+}
+*/
+
+
+void setup() {
+  Serial.begin(9600);
+  delay(300);
+  pinMode(LED, OUTPUT);
+
+  AudioMemory(32);
+  audioShield.enable();
+  audioShield.volume(0.55);
+
+  // Enable the line input — use AUDIO_INPUT_LINEIN or MIC as needed
+  audioShield.inputSelect(AUDIO_INPUT_LINEIN);
+  audioShield.lineInLevel(7);   // 0–15, adjust to taste
+
+
+  myFilterL.begin(fir_list[start_idx].coeffs, fir_list[start_idx].num_coeffs);
+  myFilterR.begin(fir_list[start_idx].coeffs, fir_list[start_idx].num_coeffs);
+
+
+  // Generate initial tone and apply starting position
+  // float ld = sqrtf(powf(transmit_x - left_ear_x,  2) + powf(transmit_y, 2));
+  // float rd = sqrtf(powf(transmit_x - right_ear_x, 2) + powf(transmit_y, 2));
+  // applySpatialisation(ld, rd);
+    recordQueue.begin();  // start capturing input blocks
+
+}
+
 
 void loop() {
+  // Redundant outer getBuffer() calls removed (were causing unused variable warnings)
+  
+  if (recordQueue.available() >= 1) {
+    int16_t *input = recordQueue.readBuffer();
 
-  float left_ear_distance =
-      sqrt(pow(transmit_x - left_ear_x, 2) + pow(transmit_y, 2));
+    int16_t *blockL = queueL.getBuffer();
+    int16_t *blockR = queueR.getBuffer();
 
-  float right_ear_distance =
-      sqrt(pow(transmit_x - right_ear_x, 2) + pow(transmit_y, 2));
+    if (blockL != NULL && blockR != NULL) {
+      for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
 
-  audio_buffer = update(left_ear_distance, right_ear_distance, audio_buffer);
+        int16_t dry = input[i];  // <-- real audio input, sine wave removed
 
-  Serial.println("Audio updated");
+        ringL[write_pos] = dry;
+        ringR[write_pos] = dry;
 
-  if (Serial.available() > 0) {
-    String input = Serial.readStringUntil('\n');
-    if (input.startsWith("pos")) {
-      // Parse new transmitter position from input
-      sscanf(input.c_str(), "pos %f %f", &transmit_x, &transmit_y);
-      Serial.print("Updated transmitter position: ");
-      Serial.print(transmit_x);
-      Serial.print(", ");
-      Serial.println(transmit_y);
+        int readL = ringIndex(write_pos - delayL_samples);
+        int readR = ringIndex(write_pos - delayR_samples);
+
+        blockL[i] = clamp16((int)(ringL[readL] * gainL_global * gainL));
+        blockR[i] = clamp16((int)(ringR[readR] * gainR_global * gainR));
+
+        write_pos = ringIndex(write_pos + 1);
+      }
+      queueL.playBuffer();
+      queueR.playBuffer();
+    }
+
+    recordQueue.freeBuffer();
+  }
+
+  // Non-blocking serial read
+  while (Serial.available() > 0) {
+    char c = Serial.read();
+    if (c == '\n') {
+      serialReady = true;
+    } else {
+      serialBuf += c;
     }
   }
-  delay(10);
 
+  // Only process the command once the full line has arrived
+  if (serialReady) {
+    if (serialBuf.startsWith("pos")) {
+      sscanf(serialBuf.c_str(), "pos %f %f", &transmit_x, &transmit_y);
+      Serial.print("Updated position: ");
+      Serial.print(transmit_x); Serial.print(", "); Serial.println(transmit_y);
+
+      float ld = sqrtf(powf(transmit_x - left_ear_x,  2) + powf(transmit_y, 2));
+      float rd = sqrtf(powf(transmit_x - right_ear_x, 2) + powf(transmit_y, 2));
+      updateSpatialParams(ld, rd);
+    }
+    serialBuf  = "";
+    serialReady = false;
+  }
 
 }
-
