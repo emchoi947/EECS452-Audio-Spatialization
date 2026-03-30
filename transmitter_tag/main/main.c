@@ -13,5 +13,5 @@ void app_main(void) {
 
     // Begin reading and transmitting the audio data
     xTaskCreate(i2s_read_task, "i2s_cap", 4096, NULL, 10, NULL);
-    xTaskCreate(ble_transmit_task, "ble_tx", 8192, NULL, 5, NULL);
+    nimble_port_freertos_init(ble_host_task);
 }
