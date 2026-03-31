@@ -10,8 +10,10 @@ void app_main(void) {
 
     //Initialize a queue to hold frames of audio data
     audio_frame_queue = xQueueCreate(10, FRAME_SIZE_BYTES);
+    assert(audio_frame_queue != NULL);
 
     // Begin reading and transmitting the audio data
     xTaskCreate(i2s_read_task, "i2s_cap", 4096, NULL, 10, NULL);
+    xTaskCreate(ble_tx_audio, "ble_audio_tx", 4096, NULL, 5, NULL);
     nimble_port_freertos_init(ble_host_task);
 }

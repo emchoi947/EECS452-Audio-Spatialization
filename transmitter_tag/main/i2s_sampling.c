@@ -20,7 +20,8 @@ calculating AoA information.
 */
 
 #include "common.h"
-#include "lc3_encoder.h"
+#include "i2s_sampling.h"
+#include "adpcm.h"
 
 #define I2S_SCK_IO1 //add GPIO pin
 #define I2S_WS_IO1 //add GPIO pin
@@ -29,6 +30,7 @@ calculating AoA information.
 static i2s_chan_handle_t rx_handle;
 
 //Initialize the I2S channel in Simplex mode as a receiver 
+// Configuration for 16kHz, 10ms frame
 void i2s_init_std_simplex(void){
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &rx_handle));
@@ -61,7 +63,7 @@ void i2s_read_task(void *args) {
         esp_err_t result = i2s_channel_read(rx_handle, temp_buffer, FRAME_SIZE_BYTES, &bytes_read, portMAX_DELAY);
         if(result == ESP_OK && bytes_read == FRAME_SIZE_BYTES){
             //Pass the sampled data to the FreeRTOS queue for processing
-            int32_t *raw_samples = upsample_32(temp_buf);
+            int32_t *raw_samples = upsample_32(temp_buffer);
             for(int i=0; i<160; i++){
                 processing_buf[i] = (int16_t)(raw_samples[i]>>8);
             }

@@ -12,13 +12,20 @@
 #include "nimble/nimble_port.h"
 #include "nimble/nimble_port_freertos.h"
 #include "host/ble_hs.h"
+#include "console/console.h"
 #include "services/gap/ble_svc_gap.h"
 #include "services/gatt/ble_svc_gatt.h"
 
 
-char *TAG = "BLE-Microphone";
+static const char *TAG = "BLE-Microphone";
 uint8_t ble_addr_type;
-void ble_app_advertise(void);
+static bool notify_state;
+static uint16_t conn_handle;
+uint16_t hrs_hrm_handle;
+
+static void ble_tx_audio(void *pvParameters);
+
+void ble_audio_advertise(void);
 
 void ble_app_on_sync(void);
 
