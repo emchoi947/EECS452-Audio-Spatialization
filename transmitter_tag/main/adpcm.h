@@ -2,7 +2,7 @@
 #include <stdint.h>
 
 typedef struct {
-    int16_t predicted;
+    int32_t predicted;
     int     step_index;
 } adpcm_state_t;
 

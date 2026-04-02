@@ -22,13 +22,13 @@
 #include "driver/gpio.h"
 #include "driver/spi_common.h"
 #include "sdmmc_cmd.h"
-#include "format_wav.h"
+//#include "format_wav.h" espressif audio codec
 #include "esp_log.h"
 
 
 
 #define FRAME_SIZE_BYTES 640 //160 samples per frame that are each 4 bytes
-#define AUDIO_FRAME_SAMPLES 320
+#define AUDIO_FRAME_SAMPLES 160 //16kHz sampling rate at 10ms frame lengths
 #define ADPCM_FRAME_BYTES 80
 
 extern QueueHandle_t audio_frame_queue; //Real declaration happens in main.c

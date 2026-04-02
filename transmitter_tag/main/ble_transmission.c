@@ -20,9 +20,69 @@ calculating AoA information.
 */
 
 #include "ble_transmission.h"
-#include "lc3_encoder.h"
+#include "adpcm.h"
 
-static void ble_tx_audio(void *pvParameters){
+static const char *TAG = "BLE-Microphone";
+uint8_t ble_addr_type;
+static bool notify_state;
+static uint16_t conn_handle;
+uint16_t hrs_hrm_handle;
+
+//Define custom UUIDs
+static ble_uuid128_t audio_svc_uuid = {
+    .u   = { .type = BLE_UUID_TYPE_128 },
+    .value = { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+               0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 }
+};
+
+static ble_uuid128_t audio_chr_uuid = {
+    .u   = { .type = BLE_UUID_TYPE_128 },
+    .value = { 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+               0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 }
+};
+
+/*Delete or comment out these lines when using custom UUIDs
+static ble_uuid16_t audio_svc_uuid = BLE_UUID16_INIT(0x180D);
+static ble_uuid16_t audio_chr_uuid = BLE_UUID16_INIT(0x2A37);
+*/
+
+// GATT read callback — required by gatt_svcs table
+static int device_read(uint16_t conn_handle, uint16_t attr_handle,
+                       struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    const char *msg = "ESP32-H2 Audio Tag";
+    os_mbuf_append(ctxt->om, msg, strlen(msg));
+    return 0;
+}
+
+// GATT write callback — required by gatt_svcs table
+int device_write(uint16_t conn_handle, uint16_t attr_handle,
+                        struct ble_gatt_access_ctxt *ctxt, void *arg) {
+    // Not used by transmitter, but required
+    return 0;
+}
+
+
+static const struct ble_gatt_chr_def audio_characteristics[] = {
+    {
+        .uuid       = &audio_chr_uuid.u,
+        .flags      = BLE_GATT_CHR_F_NOTIFY,
+        .val_handle = &hrs_hrm_handle,
+        .access_cb  = device_read,
+    },
+    { 0 }
+};
+
+static const struct ble_gatt_svc_def gatt_svcs[] = {
+    {
+        .type            = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid            = &audio_svc_uuid.u,
+        .characteristics = audio_characteristics,
+    },
+    { 0 }
+};
+
+
+void ble_tx_audio(void *pvParameters){
     int16_t audio_frame[AUDIO_FRAME_SAMPLES];
     uint8_t compressed[ADPCM_FRAME_BYTES];
     adpcm_state_t adpcm_state = {0, 0};
@@ -34,7 +94,7 @@ static void ble_tx_audio(void *pvParameters){
             continue;
         }
         if (!notify_state) {
-            ble_tx_audio_stop();
+            //ble_tx_audio_stop();
             continue;
         }
 
@@ -65,7 +125,7 @@ static void ble_tx_audio(void *pvParameters){
 }
 //notes:
 //modlog is NimBLE specific and so better to use than ESP_LOGI
-static int bleaudio_gap_event(struct ble_gap_event *event, void *arg) {
+int bleaudio_gap_event(struct ble_gap_event *event, void *arg) {
     switch (event->type) {
     case BLE_GAP_EVENT_CONNECT:
         //a new connection was established or an attempt failed
@@ -82,28 +142,25 @@ static int bleaudio_gap_event(struct ble_gap_event *event, void *arg) {
     case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(INFO, "disconnect; reason=%d\n", event->disconnect.reason);
         notify_state = false;
-        ble_tx_audio_stop();
+        //ble_tx_audio_stop();
         conn_handle = BLE_HS_CONN_HANDLE_NONE;
         //Connection terminated; resume advertising 
         ble_audio_advertise();
         break;
+
     case BLE_GAP_EVENT_ADV_COMPLETE:
         MODLOG_DFLT(INFO, "adv complete\n");
         ble_audio_advertise();
         break;
+
     case BLE_GAP_EVENT_SUBSCRIBE:
         MODLOG_DFLT(INFO, "subscribe event; cur_notify=%d\n value handle; "
                     "val_handle=%d\n",
                     event->subscribe.cur_notify, hrs_hrm_handle);
-        if (event->subscribe.attr_handle == hrs_hrm_handle) {
-            notify_state = event->subscribe.cur_notify;
-            ble_tx_audio_reset();
-        } else if (event->subscribe.attr_handle != hrs_hrm_handle) {
-            notify_state = event->subscribe.cur_notify;
-            ble_tx_audio_stop();
-        }
-        ESP_LOGI("BLE_GAP_SUBSCRIBE_EVENT", "conn_handle from subscribe=%d", conn_handle);
+        notify_state = event->subscribe.cur_notify;
+        ESP_LOGI(TAG, "conn_handle from subscribe=%d", conn_handle);
         break;
+
     case BLE_GAP_EVENT_MTU:
         MODLOG_DFLT(INFO, "mtu update event; conn_handle=%d mtu=%d\n",
                     event->mtu.conn_handle,
@@ -127,6 +184,7 @@ void ble_audio_advertise(void){
     fields.name = (uint8_t *)device_name;
     fields.name_len = strlen(device_name);
     fields.name_is_complete = 1;
+
     rc = ble_gap_adv_set_fields(&fields); //configure GAP
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "error setting advertisement data; rc=%d\n", rc);
@@ -138,7 +196,8 @@ void ble_audio_advertise(void){
     memset(&adv_params, 0, sizeof(adv_params));
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND; //undirected-connectable
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN; //general-discoverable
-    rc = ble_gap_adv_start(ble_addr_type, NULL, BLE_HS_FOREVER, &adv_params, ble_gap_event, NULL);
+
+    rc = ble_gap_adv_start(ble_addr_type, NULL, BLE_HS_FOREVER, &adv_params, bleaudio_gap_event, NULL);
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", rc);
         return;
@@ -146,17 +205,16 @@ void ble_audio_advertise(void){
 }
 
 void ble_app_on_sync(void) {
-    int rc;
-
-    rc = ble_hs_id_infer_auto(0, &ble_addr_type); //determines the best address type automatically
+    int rc = ble_hs_id_infer_auto(0, &ble_addr_type); //determines the best address type automatically
     assert(rc == 0);
 
     uint8_t addr_val[6] = {0};
-    rc = ble_hs_id_copy_addr(blehr_addr_type, addr_val, NULL);
+    rc = ble_hs_id_copy_addr(ble_addr_type, addr_val, NULL);
 
-    MODLOG_DFLT(INFO, "Device Address: ");
-    print_addr(addr_val);
-    MODLOG_DFLT(INFO, "\n");
+    MODLOG_DFLT(INFO, "Device Address: %02x:%02x:%02x:%02x:%02x:%02x\n", addr_val[5], addr_val[4], addr_val[3],
+                addr_val[2], addr_val[1], addr_val[0]);
+    //print_addr(addr_val);
+    //MODLOG_DFLT(INFO, "\n");
     ble_audio_advertise(); //define the ble connection (see function)
 }
 
@@ -172,15 +230,17 @@ void ble_transmission_init() {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
     //initialize the host stack using NimBLE
     ret = nimble_port_init();
     if (ret != ESP_OK) {
         MODLOG_DFLT(ERROR, "Failed to init nimble %d \n", ret);
         return;
     }
+
     //begin setting up NimBLE configuration
     //set device name
-    ble_srv_gap_device_name_set("BLE-Microphone");
+    ble_svc_gap_device_name_set("BLE-Microphone");
     //initialize the generic access profile (GAP)
     ble_svc_gap_init();
     //initialize the generic attribute profile (GATT) (see ble_transmission.h)
@@ -189,20 +249,12 @@ void ble_transmission_init() {
     ble_gatts_count_cfg(gatt_svcs);
     //initialize the 
     ble_gatts_add_svcs(gatt_svcs);
+
     ble_hs_cfg.sync_cb = ble_app_on_sync;
-    ble_hs_cfg.reset_cb = ble_app_on_reset;
+    //ble_hs_cfg.reset_cb = ble_app_on_reset;
 }
 
 void ble_host_task(void *args) {
-    uint8_t *processing_buf = (uint8_t *)malloc(FRAME_SIZE_BYTES);
-
-    while(1) {
-        if(xQueueReceive(audio_frame_queue, processing_buf, portMAX_DELAY == pdTRUE)) {
-            //Compress the data into the LC3 format
-            lc3_encode(processing_buf);
-            //Send the compressed data via bluetooth
-            ble_transmit(processing_buf);
-        }
-    }
-    free(processing_buf);
+    nimble_port_run();
+    nimble_port_freertos_deinit();
 }
