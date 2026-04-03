@@ -121,6 +121,8 @@ void ble_tx_audio(void *pvParameters){
 
             offset += chunk_size;
         }
+        // Pace to real-time: 160 samples at 16kHz = 10ms
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 //notes:

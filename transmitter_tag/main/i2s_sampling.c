@@ -27,6 +27,10 @@ calculating AoA information.
 #define I2S_WS_IO1 11//add GPIO pin
 #define I2S_SD_IO1 12//add GPIO pin
 
+//test macros
+#define SINE_FREQ_HZ    440      // A4 note
+#define SAMPLE_RATE_HZ  16000
+
 static i2s_chan_handle_t rx_handle;
 
 //Initialize the I2S channel in Simplex mode as a receiver 
@@ -57,7 +61,7 @@ void i2s_init_std_simplex(void){
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle, &std_rx_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle));
 }
-
+/*
 void i2s_read_task(void *args) {
     uint8_t *temp_buffer = (uint8_t *)malloc(FRAME_SIZE_BYTES);
     int16_t processing_buf[160];
@@ -86,4 +90,30 @@ void i2s_read_task(void *args) {
         }
     }
     free(temp_buffer);
+}*/
+
+//test sending compressed sine wave
+void i2s_read_task(void *args) {
+    int16_t processing_buf[AUDIO_FRAME_SAMPLES];
+    static float phase = 0.0f;
+    float phase_increment = 2.0f * M_PI * SINE_FREQ_HZ / SAMPLE_RATE_HZ;
+
+    while (1) {
+        // Fill one frame with a sine wave
+        for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
+            processing_buf[i] = (int16_t)(32767.0f * sinf(phase));
+            phase += phase_increment;
+            if (phase >= 2.0f * M_PI) {
+                phase -= 2.0f * M_PI;  // wrap to avoid float drift
+            }
+        }
+
+        if (xQueueSend(audio_frame_queue, processing_buf, 0) != pdTRUE) {
+            ESP_LOGW("SINE", "Queue full! Dropping frame.");
+        }
+
+        // Pace output to match 16kHz real time:
+        // 160 samples at 16kHz = 10ms per frame
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }

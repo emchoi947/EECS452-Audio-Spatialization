@@ -6,7 +6,7 @@ QueueHandle_t audio_frame_queue;
 
 void app_main(void) {
     // Initialize the I2S Hardware
-    i2s_init_std_simplex();
+    //i2s_init_std_simplex();
 
     //Initialize the bluetooth communication
     ble_transmission_init();
@@ -19,5 +19,6 @@ void app_main(void) {
     xTaskCreate(i2s_read_task, "i2s_cap", 4096, NULL, 10, NULL);
     xTaskCreate(ble_tx_audio, "ble_audio_tx", 4096, NULL, 5, NULL);
     nimble_port_freertos_init(ble_host_task);
+    
     vTaskDelete(NULL);
 }
