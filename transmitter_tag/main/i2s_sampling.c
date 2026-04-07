@@ -17,23 +17,33 @@ frequency and store it on a buffer in RAM (GDMA) for further processing. In the 
 project, ble_transmission.c will use DMA to read from this buffer, compress the data into the 
 LE Audio format (IC3) using ic3_encoder.c, and finally transmit the audio for receiving and 
 calculating AoA information.  
-*/
+*/  
 
 #include "common.h"
-#include "lc3_encoder.h"
+#include "i2s_sampling.h"
+#include "adpcm.h"
 
-#define I2S_SCK_IO1 //add GPIO pin
-#define I2S_WS_IO1 //add GPIO pin
-#define I2S_SD_IO1 //add GPIO pin
+#define I2S_SCK_IO1 10//add GPIO pin
+#define I2S_WS_IO1 11//add GPIO pin
+#define I2S_SD_IO1 12//add GPIO pin
+
+//test macros
+#define SINE_FREQ_HZ    440      // A4 note
+#define SAMPLE_RATE_HZ  16000
 
 static i2s_chan_handle_t rx_handle;
 
 //Initialize the I2S channel in Simplex mode as a receiver 
+// Configuration for 16kHz, 10ms frame
 void i2s_init_std_simplex(void){
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
     ESP_ERROR_CHECK(i2s_new_channel(&chan_cfg, NULL, &rx_handle));
     i2s_std_config_t std_rx_cfg = {
-        .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(16000),
+        .clk_cfg = {
+            .sample_rate_hz = 16000,
+            .clk_src = I2S_CLK_SRC_DEFAULT,
+            .mclk_multiple = I2S_MCLK_MULTIPLE_384,
+        },
         .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_24BIT, I2S_SLOT_MODE_MONO),
         .gpio_cfg = {
             .mclk = I2S_GPIO_UNUSED,
@@ -51,7 +61,7 @@ void i2s_init_std_simplex(void){
     ESP_ERROR_CHECK(i2s_channel_init_std_mode(rx_handle, &std_rx_cfg));
     ESP_ERROR_CHECK(i2s_channel_enable(rx_handle));
 }
-
+/*
 void i2s_read_task(void *args) {
     uint8_t *temp_buffer = (uint8_t *)malloc(FRAME_SIZE_BYTES);
     int16_t processing_buf[160];
@@ -61,12 +71,12 @@ void i2s_read_task(void *args) {
         esp_err_t result = i2s_channel_read(rx_handle, temp_buffer, FRAME_SIZE_BYTES, &bytes_read, portMAX_DELAY);
         if(result == ESP_OK && bytes_read == FRAME_SIZE_BYTES){
             //Pass the sampled data to the FreeRTOS queue for processing
-            int32_t *raw_samples = upsample_32(temp_buf);
+            int32_t *raw_samples = upsample_32(temp_buffer);
             for(int i=0; i<160; i++){
                 processing_buf[i] = (int16_t)(raw_samples[i]>>8);
             }
             if(xQueueSend(audio_frame_queue, processing_buf, 0) != pdTRUE){
-                ESP_LOGW("I2S", "Queue full! Dropping audio frame.")
+                ESP_LOGW("I2S", "Queue full! Dropping audio frame.");
             }
         }
         else if(result == ESP_ERR_TIMEOUT){
@@ -80,4 +90,30 @@ void i2s_read_task(void *args) {
         }
     }
     free(temp_buffer);
+}*/
+
+//test sending compressed sine wave
+void i2s_read_task(void *args) {
+    int16_t processing_buf[AUDIO_FRAME_SAMPLES];
+    static float phase = 0.0f;
+    float phase_increment = 2.0f * M_PI * SINE_FREQ_HZ / SAMPLE_RATE_HZ;
+
+    while (1) {
+        // Fill one frame with a sine wave
+        for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
+            processing_buf[i] = (int16_t)(32767.0f * sinf(phase));
+            phase += phase_increment;
+            if (phase >= 2.0f * M_PI) {
+                phase -= 2.0f * M_PI;  // wrap to avoid float drift
+            }
+        }
+
+        if (xQueueSend(audio_frame_queue, processing_buf, 0) != pdTRUE) {
+            ESP_LOGW("SINE", "Queue full! Dropping frame.");
+        }
+
+        // Pace output to match 16kHz real time:
+        // 160 samples at 16kHz = 10ms per frame
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
 }
