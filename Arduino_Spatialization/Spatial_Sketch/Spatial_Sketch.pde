@@ -28,6 +28,10 @@ AudioConnection c2(queueR,    0, myFilterR, 0);
 AudioConnection c3(myFilterL, 0, audioOutput, 0);
 AudioConnection c4(myFilterR, 0, audioOutput, 1);
 
+
+
+
+
 // --- Your spatialization globals ---
 // --- Spatialization globals (unchanged) ---
 const float head_width     = 0.15;
@@ -82,12 +86,18 @@ int ringIndex(int pos) {
   return pos;
 }
 
-void angle_gain(float angle_diff, float &gL, float &gR) {
+void angle_gain(float angle_diff, float &gL, float &gR, boolean angle_flipped) {
   float rad_angle = angle_diff * PI / 180.0f;
-  float panL = 0.5f * (1.0f + sinf(rad_angle));
-  float panR = 0.5f * (1.0f - sinf(rad_angle));
+  float panL = abs(0.5f * (1.0f + sinf(rad_angle)));
+  float panR = abs(0.5f * (1.0f - sinf(rad_angle)));
   gL = powf(panL, 0.5f);
   gR = powf(panR, 0.5f);
+  if (angle_flipped) {
+    gL = powf(panR, 0.5f);
+    gR = powf(panL, 0.5f);
+  }
+  if (gL< 0.02) gL = 0.02;
+  if (gR< 0.02) gR = 0.02;
 }
 
 void updateSpatialParams(float angle_diff) {
@@ -96,14 +106,23 @@ void updateSpatialParams(float angle_diff) {
   if (angle_diff < -89.5f && angle_diff > -90.5f) angle_diff = -89.5f;
   if (angle_diff >  89.5f && angle_diff < 90.5f) angle_diff =  89.5f;
   
-  if (abs(angle_diff) > 90.0f) {
-    angle_diff = angle_diff + 90.0f * (angle_diff / abs(angle_diff)); // Wrap to [-90, 90]
+  boolean angle_flipped = false;
+
+  if( angle_diff < -90.0f){
+
+   angle_diff = angle_diff +180.0f;
+    angle_flipped = true;
+  }
+  if( angle_diff > 90.0f){
+
+   angle_diff = angle_diff -180.0f;
+    angle_flipped = true;
   }
 
   float itd = itd_max * (angle_diff * 10 / 9) / 100;
   if (abs(itd) > itd_max) itd = itd / (itd/itd_max) ; // Clamp ITD to max by scaling it back proportionally
   int itd_samples = (int)roundf(itd * sample_rate);
-
+  if( angle_flipped) itd_samples = -itd_samples; // Flip ITD if angle was flipped to maintain correct delay direction
   if (itd_samples > 0) {
     delayL_samples = itd_samples;
     delayR_samples = 0;
@@ -112,14 +131,18 @@ void updateSpatialParams(float angle_diff) {
     delayR_samples = abs(itd_samples);
   }
 
-  angle_gain(angle_diff, gainL, gainR);
+  angle_gain(angle_diff, gainL, gainR, angle_flipped);
 
   float ild = 20.0f * log10f((angle_diff+90.0f) / 90.0f + 1e-3f); // Avoid log(0) with small offset
   gainL_global = pow(powf(10.0f,  ild / 20.0f), 0.5);
   gainR_global = pow(powf(10.0f, -ild / 20.0f), 0.5);
+  if(angle_flipped){
+    gainL_global = pow(powf(10.0f, -ild / 20.0f), 0.5);
+    gainR_global = pow(powf(10.0f,  ild / 20.0f), 0.5);
+  }
 
-  if(gainL_global >2) gainL_global = 2;
-  if(gainR_global >2) gainR_global = 2;
+  if(gainL_global >3) gainL_global = 3;
+  if(gainR_global >3) gainR_global = 3;
 
   Serial.print("ITD (samples): "); Serial.print(itd_samples);
   Serial.print(", ILD (dB): ");    Serial.println(ild);
@@ -180,15 +203,56 @@ void applySpatialisation(float left_dist, float right_dist) {
 }
 */
 
+// Sending AT commands to the U-locate module so it will go into the proper format we desire
+
+void sendATCommand(const char* cmd) {
+    Serial8.print(cmd);
+    Serial8.print("\r");   // AT commands need CR+LF
+    Serial.print("Sent: ");  // echo to USB debug
+    Serial.println(cmd);
+}
+
+// In setup() after Serial8.begin() — configure the module
+void configureUloModule() {
+    delay(2000);  // wait for NINA-B4 to boot
+    while (Serial8.available()) Serial8.read();  // flush
+
+    // Set report interval to 100ms
+    sendATCommand("AT+UDFCFG=9,100");
+    delay(500);
+    while (Serial8.available()) Serial8.read();
+
+    // Set binary output mode (already confirmed working)
+    sendATCommand("AT+UDFCFG=7,2");
+    delay(500);
+    while (Serial8.available()) Serial8.read();
+
+    // Enable direction finding — this starts the data stream
+    sendATCommand("AT+UDFENABLE=1");
+    delay(500);
+    while (Serial8.available()) Serial8.read();
+}
 
 void setup() {
   Serial.begin(9600);
   delay(300);
   pinMode(LED, OUTPUT);
 
+  // Hardware Serial
+  while (!Serial) { delay(1); }
+  Serial8.begin(115200);
+
+  //Audio shield
+
+
   AudioMemory(32);
   audioShield.enable();
   audioShield.volume(0.55);
+
+  //Memory set
+  memset(ringL, 0, sizeof(ringL));
+  memset(ringR, 0, sizeof(ringR));
+
 
   // Enable the line input — use AUDIO_INPUT_LINEIN or MIC as needed
   audioShield.inputSelect(AUDIO_INPUT_LINEIN);
@@ -199,6 +263,14 @@ void setup() {
   myFilterR.begin(fir_list[start_idx].coeffs, fir_list[start_idx].num_coeffs);
 
 
+  //Initalizign U-locate module
+
+  
+
+
+  configureUloModule();
+
+
   // Generate initial tone and apply starting position
   // float ld = sqrtf(powf(transmit_x - left_ear_x,  2) + powf(transmit_y, 2));
   // float rd = sqrtf(powf(transmit_x - right_ear_x, 2) + powf(transmit_y, 2));
@@ -206,6 +278,43 @@ void setup() {
     recordQueue.begin();  // start capturing input blocks
 
 }
+
+
+// Setting Up the code reading in the UUDF message from the sending thing.
+
+// --- u-locateEmbed parser globals (add at top) ---
+enum UloState {
+    ULO_SYNC,
+    ULO_TYPE,
+    ULO_LEN1, ULO_LEN2,
+    ULO_PAYLOAD
+};
+
+UloState uloState   = ULO_SYNC;
+uint8_t  uloType    = 0;
+uint16_t uloLen     = 0;
+uint16_t uloPayIdx  = 0;
+uint8_t  uloPayload[128];
+float   uloAngle_averaging[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+int      uloAngle_idx = 0;
+
+void processUloMessage(uint8_t type, uint8_t *p, uint16_t len) {
+    if (type == 0x01 && len >= 7) {
+        uloAngle_averaging[uloAngle_idx] = (float)(int8_t)p[6];  // cast to signed first!
+        uloAngle_idx = (uloAngle_idx + 1) % 5;
+        // Calculate average azimuth
+        float azimuth = 0.0f;
+        for (int i = 0; i < 5; i++) {
+            azimuth += uloAngle_averaging[i];
+        }
+        azimuth /= 5.0f;
+
+        Serial.print("Azimuth: ");
+        Serial.println(azimuth);
+        updateSpatialParams(azimuth);
+    }
+}
+
 
 
 void loop() {
@@ -250,6 +359,56 @@ void loop() {
     }
   }
 
+// --- Drop into loop() replacing your Serial8 block ---
+while (Serial8.available() > 0) {
+  
+    uint8_t b = Serial8.read();
+    Serial.print("Received byte: 0x");
+    Serial.println(b, HEX);  // ← you probably already have this
+    switch (uloState) {
+
+      case ULO_SYNC:
+         
+          if (b == 0xFE) uloState = ULO_TYPE;
+          break;
+
+      case ULO_TYPE:
+          Serial.println(); // Add a newline for better readability in the logs
+          Serial.print("Type byte: 0x");
+          Serial.println(b, HEX);  // ADD THIS to see what type is actually coming
+          if (b == 0x01 || b == 0x02) {
+              uloType  = b;
+              uloState = ULO_LEN1;
+          } else {
+              Serial.print("Unexpected type, resyncing: 0x");
+              Serial.println(b, HEX);
+              uloState = ULO_SYNC;
+          }
+          break;
+        case ULO_LEN1:
+            uloLen   = b;              // low byte
+            uloState = ULO_LEN2;
+            break;
+
+        case ULO_LEN2:
+            uloLen  |= ((uint16_t)b << 8);   // high byte
+            uloPayIdx = 0;
+            uloState  = (uloLen > 0) ? ULO_PAYLOAD : ULO_SYNC;
+            break;
+
+        case ULO_PAYLOAD:
+            if (uloPayIdx < sizeof(uloPayload))
+                uloPayload[uloPayIdx] = b;
+            uloPayIdx++;
+            if (uloPayIdx >= uloLen) {
+                processUloMessage(uloType, uloPayload, uloLen);
+                uloState = ULO_SYNC;
+            }
+            break;
+    }
+    
+  }
+
   // Only process the command once the full line has arrived
   if (serialReady) {
     if (serialBuf.startsWith("angle")) {
@@ -262,4 +421,12 @@ void loop() {
     serialReady = false;
   }
 
+}
+
+
+
+/* 
+void loop() {
+    while (Serial.available())  Serial8.write(Serial.read());
+    while (Serial8.available()) Serial.write(Serial8.read());
 }
