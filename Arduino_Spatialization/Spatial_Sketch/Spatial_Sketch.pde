@@ -241,7 +241,8 @@ void setup() {
   // Hardware Serial
   while (!Serial) { delay(1); }
   Serial8.begin(115200);
-
+  delay(300);
+  Serial7.begin(9600);
   //Audio shield
 
 
