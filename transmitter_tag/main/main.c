@@ -1,6 +1,7 @@
 #include "common.h"
 #include "i2s_sampling.h"
 #include "ble_transmission.h"
+#include "aoa_ble.h"
 
 QueueHandle_t audio_frame_queue;
 
@@ -8,8 +9,9 @@ void app_main(void) {
     // Initialize the I2S Hardware
     //i2s_init_std_simplex();
 
-    //Initialize the bluetooth communication
-    ble_transmission_init();
+    //Initialize the bluetooth communications
+    ble_transmission_init(); //audio data transmission through notifications
+    
 
     //Initialize a queue to hold frames of audio data
     audio_frame_queue = xQueueCreate(10, AUDIO_FRAME_SAMPLES * sizeof(int16_t));

@@ -21,6 +21,7 @@ calculating AoA information.
 
 #include "ble_transmission.h"
 #include "adpcm.h"
+#include "aoa_ble.h"
 
 static const char *TAG = "BLE-Microphone";
 uint8_t ble_addr_type;
@@ -140,8 +141,22 @@ int bleaudio_gap_event(struct ble_gap_event *event, void *arg) {
         }
         conn_handle = event->connect.conn_handle;
         break;
-
+    //version solving legacy advertising issues
     case BLE_GAP_EVENT_DISCONNECT:
+        MODLOG_DFLT(INFO, "disconnect; reason=%d\n", event->disconnect.reason);
+        notify_state = false;
+        conn_handle = BLE_HS_CONN_HANDLE_NONE;
+        ble_gap_ext_adv_stop(0);   // stop before reconfiguring
+        ble_audio_advertise();
+        break;
+
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        MODLOG_DFLT(INFO, "adv complete\n");
+        ble_gap_ext_adv_stop(0);
+        ble_audio_advertise();
+        break;
+    //previous version
+    /*case BLE_GAP_EVENT_DISCONNECT:
         MODLOG_DFLT(INFO, "disconnect; reason=%d\n", event->disconnect.reason);
         notify_state = false;
         //ble_tx_audio_stop();
@@ -153,7 +168,7 @@ int bleaudio_gap_event(struct ble_gap_event *event, void *arg) {
     case BLE_GAP_EVENT_ADV_COMPLETE:
         MODLOG_DFLT(INFO, "adv complete\n");
         ble_audio_advertise();
-        break;
+        break;*/
 
     case BLE_GAP_EVENT_SUBSCRIBE:
         MODLOG_DFLT(INFO, "subscribe event; cur_notify=%d\n value handle; "
@@ -172,7 +187,81 @@ int bleaudio_gap_event(struct ble_gap_event *event, void *arg) {
     return 0;
 }
 
-void ble_audio_advertise(void){
+//version of ble_audio_advertise solving legacy advertising issues
+void ble_audio_advertise(void) {
+    int rc;
+
+    // Configure extended advertising instance 0 for audio (connectable)
+    struct ble_gap_ext_adv_params ext_params = {
+        .connectable        = 1,
+        .scannable          = 0,
+        .directed           = 0,
+        .high_duty_directed = 0,
+        .legacy_pdu         = 0,
+        .anonymous          = 0,
+        .include_tx_power   = 0,
+        .scan_req_notif     = 0,
+        .itvl_min           = 160,  // 100ms
+        .itvl_max           = 160,
+        .channel_map        = 0,
+        .own_addr_type      = BLE_OWN_ADDR_PUBLIC,
+        .filter_policy      = 0,
+        .primary_phy        = BLE_HCI_LE_PHY_1M,
+        .secondary_phy      = BLE_HCI_LE_PHY_1M,
+        .tx_power           = 0,
+        .sid                = 0,
+    };
+
+    rc = ble_gap_ext_adv_configure(0, &ext_params, NULL,
+                                   bleaudio_gap_event, NULL);
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "Failed to configure audio ext adv: %d\n", rc);
+        return;
+    }
+
+    // Set advertising data (device name)
+    struct os_mbuf *data = os_msys_get_pkthdr(0, 0);
+    if (data == NULL) {
+        MODLOG_DFLT(ERROR, "Failed to get mbuf for adv data\n");
+        return;
+    }
+
+    // Build advertising data manually
+    const char *name = ble_svc_gap_device_name();
+    uint8_t adv_data[31];
+    uint8_t adv_len = 0;
+
+    // Flags
+    adv_data[adv_len++] = 2;               // length
+    adv_data[adv_len++] = 0x01;            // type: flags
+    adv_data[adv_len++] = 0x06;            // LE General Discoverable, BR/EDR not supported
+
+    // Name
+    uint8_t name_len = strlen(name);
+    adv_data[adv_len++] = name_len + 1;    // length
+    adv_data[adv_len++] = 0x09;            // type: complete local name
+    memcpy(&adv_data[adv_len], name, name_len);
+    adv_len += name_len;
+
+    os_mbuf_append(data, adv_data, adv_len);
+
+    rc = ble_gap_ext_adv_set_data(0, data);
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "Failed to set audio adv data: %d\n", rc);
+        return;
+    }
+
+    // Start extended advertising indefinitely
+    rc = ble_gap_ext_adv_start(0, 0, 0);
+    if (rc != 0) {
+        MODLOG_DFLT(ERROR, "Failed to start audio ext adv: %d\n", rc);
+        return;
+    }
+
+    MODLOG_DFLT(INFO, "Audio BLE advertising started\n");
+}
+//original code
+/*void ble_audio_advertise(void){
     //GAP - device name definition
     struct ble_hs_adv_fields fields;
     const char *device_name;
@@ -188,6 +277,7 @@ void ble_audio_advertise(void){
     fields.name_is_complete = 1;
 
     rc = ble_gap_adv_set_fields(&fields); //configure GAP
+    ESP_LOGI("BLE", "adv_set_fields rc=%d", rc);  // add this
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "error setting advertisement data; rc=%d\n", rc);
         return;
@@ -200,11 +290,12 @@ void ble_audio_advertise(void){
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN; //general-discoverable
 
     rc = ble_gap_adv_start(ble_addr_type, NULL, BLE_HS_FOREVER, &adv_params, bleaudio_gap_event, NULL);
+    ESP_LOGI("BLE", "adv_start rc=%d", rc);  // add this
     if (rc != 0) {
         MODLOG_DFLT(ERROR, "error enabling advertisement; rc=%d\n", rc);
         return;
     }
-}
+}*/
 
 void ble_app_on_sync(void) {
     int rc = ble_hs_id_infer_auto(0, &ble_addr_type); //determines the best address type automatically
@@ -217,6 +308,7 @@ void ble_app_on_sync(void) {
                 addr_val[2], addr_val[1], addr_val[0]);
     //print_addr(addr_val);
     //MODLOG_DFLT(INFO, "\n");
+    aoa_ble_init(); //cte transmission through advertisement
     ble_audio_advertise(); //define the ble connection (see function)
 }
 
