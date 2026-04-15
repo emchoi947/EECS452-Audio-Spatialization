@@ -365,12 +365,13 @@ ble_rec_gap_event(struct ble_gap_event *event, void *arg)
 
         /* Attribute data is contained in event->notify_rx.om. Use
          * `os_mbuf_copydata` to copy the data received in notification mbuf */
-        uint8_t data[80];
+        uint8_t data[84];
         int len = OS_MBUF_PKTLEN(event->notify_rx.om);
         os_mbuf_copydata(event->notify_rx.om, 0, len, data);
 
         /* Data is written to UART_PORT. */
         uart_write_bytes(UART_PORT, (const char *)data, len);
+        //ESP_LOG_BUFFER_HEX("BLE", data, len);
         return 0;
 
     case BLE_GAP_EVENT_MTU:
