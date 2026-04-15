@@ -93,6 +93,7 @@ void i2s_read_task(void *args) {
 }*/
 
 //test sending compressed sine wave
+/*
 void i2s_read_task(void *args) {
     int16_t processing_buf[AUDIO_FRAME_SAMPLES];
     static float phase = 0.0f;
@@ -114,6 +115,40 @@ void i2s_read_task(void *args) {
 
         // Pace output to match 16kHz real time:
         // 160 samples at 16kHz = 10ms per frame
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+*/
+//test with chirp waveform sweeping between 200 and 2000 Hz
+void i2s_read_task(void *args) {
+    int16_t processing_buf[AUDIO_FRAME_SAMPLES];
+    static float phase = 0.0f;
+    static float chirp_phase = 0.0f;
+    float chirp_phase_increment = 2.0f * M_PI * 0.5f / SAMPLE_RATE_HZ; // 0.5Hz sweep rate
+
+    while (1) {
+        for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
+            // Sweep frequency between 200Hz and 2000Hz
+            float chirp_freq = 200.0f + 1800.0f * (0.5f + 0.5f * sinf(chirp_phase));
+            float phase_increment = 2.0f * M_PI * chirp_freq / SAMPLE_RATE_HZ;
+
+            processing_buf[i] = (int16_t)(32767.0f * sinf(phase));
+
+            phase += phase_increment;
+            if (phase >= 2.0f * M_PI) {
+                phase -= 2.0f * M_PI;
+            }
+
+            chirp_phase += chirp_phase_increment;
+            if (chirp_phase >= 2.0f * M_PI) {
+                chirp_phase -= 2.0f * M_PI;
+            }
+        }
+
+        if (xQueueSend(audio_frame_queue, processing_buf, 0) != pdTRUE) {
+            ESP_LOGW("SINE", "Queue full! Dropping frame.");
+        }
+
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
