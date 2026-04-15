@@ -2,8 +2,9 @@
 #include <stdint.h>
 
 typedef struct {
-    int32_t predicted;
-    int     step_index;
+    int16_t predicted; //the value being encoded
+    int8_t  step_index; //stores the lookup value for the step table
+    uint8_t reserved; //aligns the struct in memory to 4 bytes
 } adpcm_state_t;
 
 static const int adpcm_step_table[89] = {
@@ -47,8 +48,9 @@ static inline uint8_t adpcm_encode_sample(int16_t sample, adpcm_state_t *state)
     if (nibble & 8) delta = -delta;
 
     state->predicted += delta;
-    if (state->predicted > 32767)  state->predicted = 32767;
-    if (state->predicted < -32768) state->predicted = -32768;
+    //type cast predicted (now int16_t) to int32_t
+    if ((int32_t)state->predicted > 32767)  state->predicted = 32767;
+    if ((int32_t)state->predicted < -32768) state->predicted = -32768;
 
     /* Update step index */
     state->step_index += adpcm_index_table[nibble & 0x0F];
