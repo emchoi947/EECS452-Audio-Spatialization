@@ -2,8 +2,8 @@
 #include <stdint.h>
 
 typedef struct {
-    int32_t predicted;
-    int     step_index;
+    int16_t predicted;
+    int8_t     step_index;
 } adpcm_state_t;
 
 static const int adpcm_step_table[89] = {
@@ -51,10 +51,10 @@ static inline int16_t adpcm_decode_sample(uint8_t nibble, adpcm_state_t *state)
 /* Decodes 80 bytes back into 160 int16_t samples */
 static inline void adpcm_decode_frame(const uint8_t *in, int16_t *samples, adpcm_state_t *state)
 {
-    for (int i = 0; i < 80; i++) {
+    for (int i = 4; i < 84; i++) {
         uint8_t lo = in[i] & 0x0F;
         uint8_t hi = (in[i] >> 4) & 0x0F;
-        samples[i * 2]     = adpcm_decode_sample(lo, state);
-        samples[i * 2 + 1] = adpcm_decode_sample(hi, state);
+        samples[(i-4) * 2]     = adpcm_decode_sample(lo, state);
+        samples[(i-4) * 2 + 1] = adpcm_decode_sample(hi, state);
     }
 }
