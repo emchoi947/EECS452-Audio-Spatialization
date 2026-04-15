@@ -304,6 +304,16 @@ ble_rec_gap_event(struct ble_gap_event *event, void *arg)
                 return 0;
             }
 
+            /* Request larger MTU */
+            rc = ble_att_set_preferred_mtu(512);
+            if (rc != 0) {
+                MODLOG_DFLT(ERROR, "Failed to set preferred MTU; rc=%d\n", rc);
+            }
+            rc = ble_gattc_exchange_mtu(event->connect.conn_handle, NULL, NULL);
+            if (rc != 0) {
+                MODLOG_DFLT(ERROR, "Failed to exchange MTU; rc=%d\n", rc);
+            }
+
             /* Perform service discovery */
             rc = peer_disc_all(event->connect.conn_handle,
                         ble_rec_on_disc_complete, NULL);

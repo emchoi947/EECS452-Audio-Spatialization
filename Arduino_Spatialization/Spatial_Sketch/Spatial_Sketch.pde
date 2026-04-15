@@ -1,3 +1,8 @@
+#define AUDIO_SAMPLE_RATE_EXACT 16000.0  // MUST be before Audio.h
+#define PLAY_THRESHOLD 128
+#define PREBUFFER_SAMPLES 320  // wait for 2 frames before starting playback to allow for better scheduling
+
+
 #include <Audio.h>
 #include <Wire.h>
 #include <SD.h>
@@ -5,17 +10,26 @@
 #include <SerialFlash.h>
 #include "low_pass.h"
 #include "band_pass.h"
+#include "adpcm_decode.h"  // add the decoder header we wrote
+
+
 
 #define LED 13
 
+
+static bool prebuffered = false;
+
+
+
 // --- Swap AudioInputI2S for two queues (one per channel) ---
+// Uncomment the line below and comment out the AudioInputI2S and AudioRecordQueue lines to switch from packet input to AUdioshield input
 AudioInputI2S         audioInput;       // replaces sine wave
 AudioRecordQueue      recordQueue;      // lets us pull samples in loop()
 
 AudioPlayQueue        queueL;
 AudioPlayQueue        queueR;
-AudioFilterFIR        myFilterL;
-AudioFilterFIR        myFilterR;
+// AudioFilterFIR        myFilterL;
+// AudioFilterFIR        myFilterR;
 AudioOutputI2S        audioOutput;
 AudioControlSGTL5000  audioShield;
 
@@ -23,10 +37,12 @@ AudioControlSGTL5000  audioShield;
 AudioConnection c0(audioInput,  0, recordQueue, 0);
 
 
-AudioConnection c1(queueL,    0, myFilterL, 0);
-AudioConnection c2(queueR,    0, myFilterR, 0);
-AudioConnection c3(myFilterL, 0, audioOutput, 0);
-AudioConnection c4(myFilterR, 0, audioOutput, 1);
+AudioConnection c1(queueL,    0, audioOutput, 0);
+AudioConnection c2(queueR,    0, audioOutput, 1);
+
+
+// AudioConnection c3(myFilterL, 0, audioOutput, 0);
+// AudioConnection c4(myFilterR, 0, audioOutput, 1);
 
 
 
@@ -36,14 +52,14 @@ AudioConnection c4(myFilterR, 0, audioOutput, 1);
 // --- Spatialization globals (unchanged) ---
 const float head_width     = 0.15;
 const float speed_of_sound = 343.0;
-const int   sample_rate    = 44100;
+const int   sample_rate    = 16000;
 
 float left_ear_x  = -head_width / 2.0;
 float right_ear_x =  head_width / 2.0;
 float transmit_x  = 0.0;
 float transmit_y  = 5.0;
 
-const int MAX_DELAY_SAMPLES = 100;
+const int MAX_DELAY_SAMPLES = 12;
 const int RING_SIZE = AUDIO_BLOCK_SAMPLES + MAX_DELAY_SAMPLES;
 
 int16_t ringL[RING_SIZE];
@@ -72,6 +88,32 @@ struct fir_filter fir_list[] = {
   {BP,   100},
   {NULL,   0}
 };
+
+
+// --- ADPCM globals ---
+#define ADPCM_FRAME_BYTES   84   // 160 samples / 2
+#define AUDIO_FRAME_SAMPLES 160
+
+// Predicted(2)-> step(3) -> n/a (4) -> rest
+adpcm_state_t adpcm_rx_state = {0, 0};  // persists across frames
+uint8_t  adpcm_buf[ADPCM_FRAME_BYTES];
+uint16_t adpcm_buf_idx = 0;
+int16_t  pcm_16k[AUDIO_FRAME_SAMPLES];
+
+#define PCM_RING_SIZE 1024
+int16_t  pcm_ring[PCM_RING_SIZE];
+volatile int pcm_write_pos = 0;
+volatile int pcm_read_pos  = 0;
+
+enum UloState { ULO_SYNC, ULO_TYPE, ULO_LEN1, ULO_LEN2, ULO_PAYLOAD };
+UloState uloState  = ULO_SYNC;
+uint8_t  uloType   = 0;
+uint16_t uloLen    = 0;
+uint16_t uloPayIdx = 0;
+uint8_t  uloPayload[128];
+float    uloAngle_averaging[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+int      uloAngle_idx = 0;
+
 
 // --- Helpers (unchanged) ---
 int clamp16(int v) {
@@ -242,26 +284,26 @@ void setup() {
   while (!Serial) { delay(1); }
   Serial8.begin(115200);
   delay(300);
-  Serial7.begin(9600);
+  Serial7.begin(115200);
   //Audio shield
 
 
-  AudioMemory(32);
+  AudioMemory(256);
   audioShield.enable();
   audioShield.volume(0.55);
 
   //Memory set
   memset(ringL, 0, sizeof(ringL));
   memset(ringR, 0, sizeof(ringR));
-
+  memset(pcm_ring, 0, sizeof(pcm_ring));
 
   // Enable the line input — use AUDIO_INPUT_LINEIN or MIC as needed
   audioShield.inputSelect(AUDIO_INPUT_LINEIN);
   audioShield.lineInLevel(7);   // 0–15, adjust to taste
 
 
-  myFilterL.begin(fir_list[start_idx].coeffs, fir_list[start_idx].num_coeffs);
-  myFilterR.begin(fir_list[start_idx].coeffs, fir_list[start_idx].num_coeffs);
+  // myFilterL.begin(fir_list[start_idx].coeffs, fir_list[start_idx].num_coeffs);
+  // myFilterR.begin(fir_list[start_idx].coeffs, fir_list[start_idx].num_coeffs);
 
 
   //Initalizign U-locate module
@@ -284,20 +326,7 @@ void setup() {
 // Setting Up the code reading in the UUDF message from the sending thing.
 
 // --- u-locateEmbed parser globals (add at top) ---
-enum UloState {
-    ULO_SYNC,
-    ULO_TYPE,
-    ULO_LEN1, ULO_LEN2,
-    ULO_PAYLOAD
-};
 
-UloState uloState   = ULO_SYNC;
-uint8_t  uloType    = 0;
-uint16_t uloLen     = 0;
-uint16_t uloPayIdx  = 0;
-uint8_t  uloPayload[128];
-float   uloAngle_averaging[5] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-int      uloAngle_idx = 0;
 
 void processUloMessage(uint8_t type, uint8_t *p, uint16_t len) {
     if (type == 0x01 && len >= 7) {
@@ -320,114 +349,210 @@ void processUloMessage(uint8_t type, uint8_t *p, uint16_t len) {
 
 void loop() {
   // Redundant outer getBuffer() calls removed (were causing unused variable warnings)
-  
-  if (recordQueue.available() >= 1) {
-    int16_t *input = recordQueue.readBuffer();
 
+  
+   while (Serial7.available() > 0 && adpcm_buf_idx < ADPCM_FRAME_BYTES) {
+    uint8_t b = Serial7.read();
+
+    adpcm_buf[adpcm_buf_idx++] = b;
+
+  }
+  static int frameCount = 0;
+  static int dropCount = 0;
+  if (adpcm_buf_idx >= ADPCM_FRAME_BYTES) {
+    adpcm_buf_idx = 0;
+    frameCount++;
+    
+    adpcm_decode_frame(adpcm_buf, pcm_16k, &adpcm_rx_state);
+
+
+     // Check for silence/garbage frames
+    int32_t energy = 0;
+    for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) energy += abs(pcm_16k[i]);
+    if (energy == 0) dropCount++;
+    
+    if (frameCount % 100 == 0) {
+        Serial.print("Frames: "); Serial.print(frameCount);
+        Serial.print(" Drops: "); Serial.println(dropCount);
+    }
+
+    // Push 160 decoded samples into pcm_ring
+    for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
+      pcm_ring[pcm_write_pos % PCM_RING_SIZE] = pcm_16k[i];
+      pcm_write_pos++;
+    }
+  }
+  
+
+   int available = pcm_write_pos - pcm_read_pos;
+    if (!prebuffered) {
+    if (available >= PREBUFFER_SAMPLES) prebuffered = true;
+    return;  // don't play yet
+    }
+
+
+   if (available >= PLAY_THRESHOLD) {
     int16_t *blockL = queueL.getBuffer();
     int16_t *blockR = queueR.getBuffer();
+    // Guard against runaway buffer before processing
 
+
+
+    if (blockL == NULL || blockR == NULL) {
+      Serial.println("AUDIO BUFFER NULL");
+    }
+
+
+    
     if (blockL != NULL && blockR != NULL) {
+        if ((pcm_write_pos - pcm_read_pos) > PCM_RING_SIZE - 160) {
+            Serial.println("PCM OVERFLOW WARNING - dropping frame");
+            pcm_read_pos = pcm_write_pos - AUDIO_BLOCK_SAMPLES; // resync
+        }
       for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+        
 
-        int16_t dry = input[i];  // <-- real audio input, sine wave removed
-
+        int16_t dry = pcm_ring[pcm_read_pos % PCM_RING_SIZE];
+        pcm_read_pos++;
+        if( dry == 0) Serial.println("0 SIGNAL WEEWOO");
         ringL[write_pos] = dry;
         ringR[write_pos] = dry;
 
         int readL = ringIndex(write_pos - delayL_samples);
         int readR = ringIndex(write_pos - delayR_samples);
 
-        blockL[i] = clamp16((int)(ringL[readL] * gainL_global * gainL));
-        blockR[i] = clamp16((int)(ringR[readR] * gainR_global * gainR));
+        // blockL[i] = clamp16((int)(ringL[readL] * gainL_global * gainL));
+        // blockR[i] = clamp16((int)(ringR[readR] * gainR_global * gainR));
+        blockL[i] = dry; // BYPASSING SPATIALIZATION FOR TESTING
+        blockR[i] = dry; // BYPASSING SPATIALIZATION FOR TESTING
 
         write_pos = ringIndex(write_pos + 1);
       }
       queueL.playBuffer();
       queueR.playBuffer();
     }
-
-    recordQueue.freeBuffer();
   }
+  else if (available == 0){
+     prebuffered = false;  // reset if we fully drain
+  }
+  else {
+    static int starvCount = 0;
+    starvCount++;
+    if (starvCount % 50 == 0) {
+        //Serial.print("Buffer starvation x50, avail=");
+        //Serial.println(available);
+    }
+}
 
   // Non-blocking serial read
   while (Serial.available() > 0) {
     char c = Serial.read();
-    if (c == '\n') {
-      serialReady = true;
-    } else {
-      serialBuf += c;
-    }
+    if (c == '\n') serialReady = true;
+    else serialBuf += c;
   }
-
-// --- Drop into loop() replacing your Serial8 block ---
-while (Serial8.available() > 0) {
-  
-    uint8_t b = Serial8.read();
-    Serial.print("Received byte: 0x");
-    Serial.println(b, HEX);  // ← you probably already have this
-    switch (uloState) {
-
-      case ULO_SYNC:
-         
-          if (b == 0xFE) uloState = ULO_TYPE;
-          break;
-
-      case ULO_TYPE:
-          Serial.println(); // Add a newline for better readability in the logs
-          Serial.print("Type byte: 0x");
-          Serial.println(b, HEX);  // ADD THIS to see what type is actually coming
-          if (b == 0x01 || b == 0x02) {
-              uloType  = b;
-              uloState = ULO_LEN1;
-          } else {
-              Serial.print("Unexpected type, resyncing: 0x");
-              Serial.println(b, HEX);
-              uloState = ULO_SYNC;
-          }
-          break;
-        case ULO_LEN1:
-            uloLen   = b;              // low byte
-            uloState = ULO_LEN2;
-            break;
-
-        case ULO_LEN2:
-            uloLen  |= ((uint16_t)b << 8);   // high byte
-            uloPayIdx = 0;
-            uloState  = (uloLen > 0) ? ULO_PAYLOAD : ULO_SYNC;
-            break;
-
-        case ULO_PAYLOAD:
-            if (uloPayIdx < sizeof(uloPayload))
-                uloPayload[uloPayIdx] = b;
-            uloPayIdx++;
-            if (uloPayIdx >= uloLen) {
-                processUloMessage(uloType, uloPayload, uloLen);
-                uloState = ULO_SYNC;
-            }
-            break;
-    }
-    
-  }
-
-  // Only process the command once the full line has arrived
   if (serialReady) {
     if (serialBuf.startsWith("angle")) {
       sscanf(serialBuf.c_str(), "angle %f", &angle);
-      Serial.print("Updated angle: ");
-      Serial.println(angle);
+      Serial.print("Manual angle: "); Serial.println(angle);
       updateSpatialParams(angle);
     }
-    serialBuf  = "";
+    serialBuf = "";
     serialReady = false;
   }
 
+// --- Drop into loop() replacing your Serial8 block ---
+  while (Serial8.available() > 0) {
+    
+      uint8_t b = Serial8.read();
+    
+      switch (uloState) {
+
+        case ULO_SYNC:
+          
+            if (b == 0xFE) uloState = ULO_TYPE;
+            break;
+
+        case ULO_TYPE:
+            Serial.println(); // Add a newline for better readability in the logs
+            Serial.print("Type byte: 0x");
+            Serial.println(b, HEX);  // ADD THIS to see what type is actually coming
+            if (b == 0x01 || b == 0x02) {
+                uloType  = b;
+                uloState = ULO_LEN1;
+            } else {
+                // Serial.print("Unexpected type, resyncing: 0x");
+                // Serial.println(b, HEX);
+                uloState = ULO_SYNC;
+            }
+            break;
+          case ULO_LEN1:
+              uloLen   = b;              // low byte
+              uloState = ULO_LEN2;
+              break;
+
+          case ULO_LEN2:
+              uloLen  |= ((uint16_t)b << 8);   // high byte
+              uloPayIdx = 0;
+              uloState  = (uloLen > 0) ? ULO_PAYLOAD : ULO_SYNC;
+              break;
+
+          case ULO_PAYLOAD:
+              if (uloPayIdx < sizeof(uloPayload))
+                  uloPayload[uloPayIdx] = b;
+              uloPayIdx++;
+              if (uloPayIdx >= uloLen) {
+                  processUloMessage(uloType, uloPayload, uloLen);
+                  uloState = ULO_SYNC;
+              }
+              break;
+      }
+      
+    }
+
+    // Only process the command once the full line has arrived
+    if (serialReady) {
+      if (serialBuf.startsWith("angle")) {
+        sscanf(serialBuf.c_str(), "angle %f", &angle);
+        Serial.print("Updated angle: ");
+        Serial.println(angle);
+        updateSpatialParams(angle);
+      }
+      serialBuf  = "";
+      serialReady = false;
+    }
+    static uint32_t lastPrint = 0;
+    if (millis() - lastPrint > 500) {
+        lastPrint = millis();
+        Serial.print("write="); Serial.print(pcm_write_pos);
+        Serial.print(" read="); Serial.print(pcm_read_pos);
+        Serial.print(" avail="); Serial.print(pcm_write_pos - pcm_read_pos);
+        Serial.print(" audioMem="); Serial.println(AudioMemoryUsageMax());
+        Serial.print(" PCM Ring[0]: "); Serial.print(pcm_ring[pcm_read_pos % PCM_RING_SIZE]);
+    }
+    static uint32_t lastFrameTime = 0;
+    // when you successfully decode a frame:
+    uint32_t now = millis();
+    // Serial.print("Frame gap ms: ");
+    // Serial.println(now - lastFrameTime);
+    lastFrameTime = now;
+    uint32_t gap = now - lastFrameTime;
+    lastFrameTime = now;
+    framesSinceLastPrint++;
+
+    if (gap > 5) {  // only print gaps > 5ms to filter noise
+        Serial.print("Frame gap ms: ");
+        Serial.print(gap);
+        Serial.print(" frames in burst: ");
+        Serial.println(framesSinceLastPrint);
+        framesSinceLastPrint = 0;
+}
+
 }
 
 
 
-/* 
-void loop() {
-    while (Serial.available())  Serial8.write(Serial.read());
-    while (Serial8.available()) Serial.write(Serial8.read());
-}
+  /* 
+  void loop() {
+      while (Serial.available())  Serial8.write(Serial.read());
+      while (Serial8.available()) Serial.write(Serial8.read());
+  }
