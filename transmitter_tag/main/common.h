@@ -27,6 +27,7 @@
 
 
 
+#define ADPCM_PACKET_BYTES (sizeof(adpcm_state_t) + ADPCM_FRAME_BYTES) //used for prepending the adpcm data to the audio packet
 #define FRAME_SIZE_BYTES 640 //160 samples per frame that are each 4 bytes
 #define AUDIO_FRAME_SAMPLES 160 //16kHz sampling rate at 10ms frame lengths
 #define ADPCM_FRAME_BYTES 80

@@ -304,6 +304,16 @@ ble_rec_gap_event(struct ble_gap_event *event, void *arg)
                 return 0;
             }
 
+            /* Request larger MTU */
+            rc = ble_att_set_preferred_mtu(512);
+            if (rc != 0) {
+                MODLOG_DFLT(ERROR, "Failed to set preferred MTU; rc=%d\n", rc);
+            }
+            rc = ble_gattc_exchange_mtu(event->connect.conn_handle, NULL, NULL);
+            if (rc != 0) {
+                MODLOG_DFLT(ERROR, "Failed to exchange MTU; rc=%d\n", rc);
+            }
+
             /* Perform service discovery */
             rc = peer_disc_all(event->connect.conn_handle,
                         ble_rec_on_disc_complete, NULL);
@@ -365,12 +375,13 @@ ble_rec_gap_event(struct ble_gap_event *event, void *arg)
 
         /* Attribute data is contained in event->notify_rx.om. Use
          * `os_mbuf_copydata` to copy the data received in notification mbuf */
-        uint8_t data[80];
+        uint8_t data[84];
         int len = OS_MBUF_PKTLEN(event->notify_rx.om);
         os_mbuf_copydata(event->notify_rx.om, 0, len, data);
 
         /* Data is written to UART_PORT. */
         uart_write_bytes(UART_PORT, (const char *)data, len);
+        //ESP_LOG_BUFFER_HEX("BLE", data, len);
         return 0;
 
     case BLE_GAP_EVENT_MTU:

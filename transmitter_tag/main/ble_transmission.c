@@ -22,6 +22,7 @@ calculating AoA information.
 #include "ble_transmission.h"
 #include "adpcm.h"
 #include "aoa_ble.h"
+#include "common.h"
 
 static const char *TAG = "BLE-Microphone";
 uint8_t ble_addr_type;
@@ -85,8 +86,9 @@ static const struct ble_gatt_svc_def gatt_svcs[] = {
 
 void ble_tx_audio(void *pvParameters){
     int16_t audio_frame[AUDIO_FRAME_SAMPLES];
-    uint8_t compressed[ADPCM_FRAME_BYTES];
-    adpcm_state_t adpcm_state = {0, 0};
+    //uint8_t compressed[ADPCM_FRAME_BYTES];
+    uint8_t packet[ADPCM_PACKET_BYTES]; //code for testing: packet with prepended adpcm state
+    adpcm_state_t adpcm_state = {0, 0, 0};
     struct os_mbuf *om;
     int rc;
 
@@ -98,8 +100,13 @@ void ble_tx_audio(void *pvParameters){
             //ble_tx_audio_stop();
             continue;
         }
-
-        adpcm_encode_frame(audio_frame, compressed, &adpcm_state);
+        // build the header to prepend to the audio packet BEFORE encoding
+        adpcm_state_t *hdr = (adpcm_state_t *)packet; //puts the struct at the beginning of packet
+        hdr->predicted = adpcm_state.predicted;
+        hdr->step_index = adpcm_state.step_index;
+        hdr->reserved = 0;
+        //encode the audio into packet
+        adpcm_encode_frame(audio_frame, packet + sizeof(adpcm_state_t), &adpcm_state); //starts inserting after the header positions of packet
 
         /* Chunk and send */
         uint16_t mtu        = ble_att_mtu(conn_handle) - 3;
@@ -108,7 +115,7 @@ void ble_tx_audio(void *pvParameters){
         while (offset < ADPCM_FRAME_BYTES) {
             uint16_t chunk_size = MIN(mtu, ADPCM_FRAME_BYTES - offset);
 
-            om = ble_hs_mbuf_from_flat(compressed + offset, chunk_size);
+            om = ble_hs_mbuf_from_flat(packet + offset, chunk_size);
             if (om == NULL) {
                 ESP_LOGE("BLE", "mbuf alloc failed at offset %d", offset);
                 break;
