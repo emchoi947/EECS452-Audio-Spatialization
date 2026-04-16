@@ -29,8 +29,13 @@ const float resample_step = (float)UPSAMPLE_IN_RATE / UPSAMPLE_OUT_RATE; // ~0.3
 float dynamic_step = resample_step;  // start at nominal
 
 
+
 // Removing CLicking with target stuff
 const int TARGET_AVAIL = 640;  // where you want the buffer to sit
+
+// ADPCM enum
+enum AdpcmParseState { ADPCM_SYNC1, ADPCM_SYNC2, ADPCM_PAYLOAD };
+static AdpcmParseState adpcmState = ADPCM_SYNC1;
 
 
 
@@ -108,7 +113,7 @@ struct fir_filter fir_list[] = {
 
 
 // --- ADPCM globals ---
-#define ADPCM_FRAME_BYTES   84   // 128 samples / 2 +4 header bytes
+#define ADPCM_FRAME_BYTES   86   // 128 samples / 2 +4 header bytes
 #define AUDIO_FRAME_SAMPLES 160
 
 // Predicted(2)-> step(3) -> n/a (4) -> rest
@@ -368,68 +373,110 @@ static bool wasStarved = false;
 
 void loop() {
   // Redundant outer getBuffer() calls removed (were causing unused variable warnings)
-
+    static int frameCount = 0;
+    static int dropCount = 0;
   
-   while (Serial7.available() > 0 && adpcm_buf_idx < ADPCM_FRAME_BYTES) {
+    while (Serial7.available() > 0) {
     uint8_t b = Serial7.read();
 
-    adpcm_buf[adpcm_buf_idx++] = b;
+    switch (adpcmState) {
 
-  }
-  static int frameCount = 0;
-  static int dropCount = 0;
+        case ADPCM_SYNC1:
+            if (b == 0xAA) adpcmState = ADPCM_SYNC2;
+            break;
 
-  if (adpcm_buf_idx >= ADPCM_FRAME_BYTES) {
+        case ADPCM_SYNC2:
+            if (b == 0xFF) {
+                adpcm_buf_idx = 0;   // fresh frame
+                adpcmState = ADPCM_PAYLOAD;
+            } else if (b == 0xAA) {
+                adpcmState = ADPCM_SYNC2;  // handle 0xAA 0xAA 0xFF
+            } else {
+                adpcmState = ADPCM_SYNC1;  // bad byte, resync
+            }
+            break;
 
-      // DECODING
+        case ADPCM_PAYLOAD:
+            adpcm_buf[adpcm_buf_idx++] = b;
+            if (adpcm_buf_idx >= ADPCM_FRAME_BYTES) {
+                adpcmState = ADPCM_SYNC1;  // done, wait for next sync
+                // decode block goes here:
+                uint8_t frame_copy[ADPCM_FRAME_BYTES];
+                memcpy(frame_copy, adpcm_buf, ADPCM_FRAME_BYTES);
+                frameCount++;
 
+                memcpy(&adpcm_rx_state.predicted, frame_copy, 2);
+                memcpy(&adpcm_rx_state.step_index, frame_copy + 2, 1);
+                adpcm_decode_frame(frame_copy, pcm_16k, &adpcm_rx_state);
 
-    if (frameCount % 50 == 0) {
-        Serial.print("Frame end:   ");
-        Serial.print(pcm_16k[125]); Serial.print(", ");
-        Serial.print(pcm_16k[126]); Serial.print(", ");
-        Serial.println(pcm_16k[127]);
+                for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
+                    if ((pcm_write_pos - pcm_read_pos) < PCM_RING_SIZE - 1) {
+                        pcm_ring[pcm_write_pos % PCM_RING_SIZE] = pcm_16k[i];
+                        pcm_write_pos++;
+                    }
+                }
+            }
+            break;
     }
-    if (frameCount % 50 == 1) {
-        Serial.print("Frame start: ");
-        Serial.print(pcm_16k[0]); Serial.print(", ");
-        Serial.print(pcm_16k[1]); Serial.print(", ");
-        Serial.println(pcm_16k[2]);
-    }
-
-    // Copy frame data before resetting index to avoid overwriting during decoding
+}
 
 
 
-      uint8_t frame_copy[ADPCM_FRAME_BYTES];
-      memcpy(&frame_copy, adpcm_buf, ADPCM_FRAME_BYTES);
-      adpcm_buf_idx = 0;  // now safe to reset
-      frameCount++;
+
+  // if (adpcm_buf_idx >= ADPCM_FRAME_BYTES) {
+
+  //     // DECODING
 
 
-    memcpy(&adpcm_rx_state.predicted, frame_copy, 2); // Initialize predicted sample with last sample of previous frame for continuity
-    memcpy(&adpcm_rx_state.step_index, frame_copy + 2, 1); // Initialize step index with last frame's value
+  //   if (frameCount % 50 == 0) {
+  //       Serial.print("Frame end:   ");
+  //       Serial.print(pcm_16k[125]); Serial.print(", ");
+  //       Serial.print(pcm_16k[126]); Serial.print(", ");
+  //       Serial.println(pcm_16k[127]);
+  //   }
+  //   if (frameCount % 50 == 1) {
+  //       Serial.print("Frame start: ");
+  //       Serial.print(pcm_16k[0]); Serial.print(", ");
+  //       Serial.print(pcm_16k[1]); Serial.print(", ");
+  //       Serial.println(pcm_16k[2]);
+  //   }
 
-    adpcm_decode_frame(frame_copy, pcm_16k, &adpcm_rx_state);
+  //   // Copy frame data before resetting index to avoid overwriting during decoding
 
 
-     // Check for silence/garbage frames
-    int32_t energy = 0;
-    for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) energy += abs(pcm_16k[i]);
-    if (energy == 0) dropCount++;
+
+  //     uint8_t frame_copy[ADPCM_FRAME_BYTES];
+  //     memcpy(&frame_copy, adpcm_buf, ADPCM_FRAME_BYTES);
+  //     adpcm_buf_idx = 0;  // now safe to reset
+  //     frameCount++;
+
+
+  //   memcpy(&adpcm_rx_state.predicted, frame_copy, 2); // Initialize predicted sample with last sample of previous frame for continuity
+  //   memcpy(&adpcm_rx_state.step_index, frame_copy + 2, 1); // Initialize step index with last frame's value
+
+  //   adpcm_decode_frame(frame_copy, pcm_16k, &adpcm_rx_state);
+
+
+  //    // Check for silence/garbage frames
+  //   int32_t energy = 0;
+  //   for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) energy += abs(pcm_16k[i]);
+  //   if (energy == 0) dropCount++;
     
-    // if (frameCount % 100 == 0) {
-    //     Serial.print("Frames: "); Serial.print(frameCount);
-    //     Serial.print(" Drops: "); Serial.println(dropCount);
-    // }
+  //   // if (frameCount % 100 == 0) {
+  //   //     Serial.print("Frames: "); Serial.print(frameCount);
+  //   //     Serial.print(" Drops: "); Serial.println(dropCount);
+  //   // }
 
-    // Push 160 decoded samples into pcm_ring
-    for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
-      pcm_ring[pcm_write_pos % PCM_RING_SIZE] = pcm_16k[i];
-      pcm_write_pos++;
-    }
+  //   // Push 160 decoded samples into pcm_ring
+  //   for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
+  //     pcm_ring[pcm_write_pos % PCM_RING_SIZE] = pcm_16k[i];
+  //     pcm_write_pos++;
+  //   }
 
-  }
+  // }
+
+
+  
   
 
    int available = pcm_write_pos - pcm_read_pos;
@@ -616,10 +663,10 @@ void loop() {
 if (now - lastBurstTime > 500) {
     lastFrameTime = now;
 
-    Serial.print("Frames in last 500ms: ");
-    Serial.print(framesSinceLastPrint);
-    Serial.print(", last gap ms: ");
-    Serial.println(gap);
+    // Serial.print("Frames in last 500ms: ");
+    // Serial.print(framesSinceLastPrint);
+    // Serial.print(", last gap ms: ");
+    // Serial.println(gap);
     framesSinceLastPrint = 0;
     lastBurstTime = now;
     }
