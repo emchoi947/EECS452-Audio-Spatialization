@@ -112,8 +112,8 @@ void ble_tx_audio(void *pvParameters){
         uint16_t mtu        = ble_att_mtu(conn_handle) - 3;
         uint16_t offset     = 0;
 
-        while (offset < ADPCM_FRAME_BYTES) {
-            uint16_t chunk_size = MIN(mtu, ADPCM_FRAME_BYTES - offset);
+        while (offset < ADPCM_PACKET_BYTES) {
+            uint16_t chunk_size = MIN(mtu, ADPCM_PACKET_BYTES - offset);
 
             om = ble_hs_mbuf_from_flat(packet + offset, chunk_size);
             if (om == NULL) {
@@ -130,7 +130,7 @@ void ble_tx_audio(void *pvParameters){
             offset += chunk_size;
         }
         // Pace to real-time: 160 samples at 16kHz = 10ms
-        vTaskDelay(pdMS_TO_TICKS(10));
+        //vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 //notes:
