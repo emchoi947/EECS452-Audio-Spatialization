@@ -58,3 +58,12 @@ static inline void adpcm_decode_frame(const uint8_t *in, int16_t *samples, adpcm
         samples[(i-4) * 2 + 1] = adpcm_decode_sample(hi, state);
     }
 }
+
+static inline adpcm_state_t adpcm_update_state(const uint8_t *frame) {
+    adpcm_state_t state;
+    state.predicted = (int16_t)((frame[1] << 8) | frame[0]);
+    state.step_index = frame[2];
+    if (state.step_index < 0)  state.step_index = 0;
+    if (state.step_index > 88) state.step_index = 88;
+    return state;
+}

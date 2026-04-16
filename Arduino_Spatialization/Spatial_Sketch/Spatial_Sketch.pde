@@ -1,6 +1,8 @@
-#define AUDIO_SAMPLE_RATE_EXACT 16000.0  // MUST be before Audio.h
-#define PLAY_THRESHOLD 128
-#define PREBUFFER_SAMPLES 320  // wait for 2 frames before starting playback to allow for better scheduling
+////#define AUDIO_SAMPLE_RATE_EXACT 16000.0  // MUST be before Audio.h
+
+
+#define PLAY_THRESHOLD 384
+#define PREBUFFER_SAMPLES 640  // wait for 2 frames before starting playback to allow for better scheduling
 
 
 #include <Audio.h>
@@ -18,6 +20,17 @@
 
 
 static bool prebuffered = false;
+
+// --- SAMPLING RATE CONVERSION SETUP ---
+#define UPSAMPLE_IN_RATE  16000
+#define UPSAMPLE_OUT_RATE 44100
+float resample_phase = 0.0f;
+const float resample_step = (float)UPSAMPLE_IN_RATE / UPSAMPLE_OUT_RATE; // ~0.3628
+float dynamic_step = resample_step;  // start at nominal
+
+
+// Removing CLicking with target stuff
+const int TARGET_AVAIL = 640;  // where you want the buffer to sit
 
 
 
@@ -44,8 +57,12 @@ AudioConnection c2(queueR,    0, audioOutput, 1);
 // AudioConnection c3(myFilterL, 0, audioOutput, 0);
 // AudioConnection c4(myFilterR, 0, audioOutput, 1);
 
+// ---  Debug Varalbles ---
 
-
+    static int framesSinceLastPrint = 0;
+    static uint16_t lastBurstTime = 0;
+    static uint16_t lastFrameTime = 0;
+// --- End of Debug System Setup ---
 
 
 // --- Your spatialization globals ---
@@ -91,7 +108,7 @@ struct fir_filter fir_list[] = {
 
 
 // --- ADPCM globals ---
-#define ADPCM_FRAME_BYTES   84   // 160 samples / 2
+#define ADPCM_FRAME_BYTES   84   // 128 samples / 2 +4 header bytes
 #define AUDIO_FRAME_SAMPLES 160
 
 // Predicted(2)-> step(3) -> n/a (4) -> rest
@@ -100,7 +117,7 @@ uint8_t  adpcm_buf[ADPCM_FRAME_BYTES];
 uint16_t adpcm_buf_idx = 0;
 int16_t  pcm_16k[AUDIO_FRAME_SAMPLES];
 
-#define PCM_RING_SIZE 1024
+#define PCM_RING_SIZE 4096
 int16_t  pcm_ring[PCM_RING_SIZE];
 volatile int pcm_write_pos = 0;
 volatile int pcm_read_pos  = 0;
@@ -206,44 +223,30 @@ void updateSpatialParams(float angle_diff) {
 
 }
 
+// --- New Upsampling Function ---
+int16_t upsample_next_cubic(void) {
+    float frac = resample_phase;  // always in [0,1)
 
-/*
-void applySpatialisation(float left_dist, float right_dist) {
-  float itd = (right_dist - left_dist) / speed_of_sound * 10.0f;
-  int   itd_samples = (int)roundf(itd * sample_rate);
-  int   delay = abs(itd_samples);
+    // 4-point Hermite cubic
+    int16_t s_1 = pcm_ring[(pcm_read_pos - 1 + PCM_RING_SIZE) % PCM_RING_SIZE];
+    int16_t s0  = pcm_ring[(pcm_read_pos)                      % PCM_RING_SIZE];
+    int16_t s1  = pcm_ring[(pcm_read_pos + 1)                  % PCM_RING_SIZE];
+    int16_t s2  = pcm_ring[(pcm_read_pos + 2)                  % PCM_RING_SIZE];
 
-  float ild   = 20.0f * log10f(right_dist / left_dist);
-  float gainL = powf(10.0f, -ild / 20.0f);
-  float gainR = powf(10.0f,  ild / 20.0f);
+    float a = -0.5f*s_1 + 1.5f*s0 - 1.5f*s1 + 0.5f*s2;
+    float b =       s_1 - 2.5f*s0 + 2.0f*s1 - 0.5f*s2;
+    float c = -0.5f*s_1            + 0.5f*s1;
+    float d =                  s0;
 
-  if (itd_samples > 0) {
-    for (int i = pending_buf_size - 1; i >= 0; i--) {
-      int dst = i + delay;
-      writeR[dst] = (dst < pending_buf_size + MAX_DELAY) ? writeR[i] : 0;
-    }
-    for (int i = 0; i < delay; i++) writeR[i] = 0;
-  } else if (itd_samples < 0) {
-    for (int i = pending_buf_size - 1; i >= 0; i--) {
-      int dst = i + delay;
-      writeL[dst] = (dst < pending_buf_size + MAX_DELAY) ? writeL[i] : 0;
-    }
-    for (int i = 0; i < delay; i++) writeL[i] = 0;
-  }
+    int32_t out = (int32_t)(a*frac*frac*frac + b*frac*frac + c*frac + d);
 
-  for (int i = 0; i < pending_buf_size + delay; i++) {
-    writeL[i] = clamp16((int)(writeL[i] * gainL));
-    writeR[i] = clamp16((int)(writeR[i] * gainR));
-  }
+    resample_phase += dynamic_step;
+    int consumed = (int)resample_phase;
+    pcm_read_pos += consumed;
+    resample_phase -= consumed;
 
-
-
-  pending_buf_size += delay;
-
-  // Signal the audio feed to swap at the next clean loop boundary
-  swap_requested = true;
+    return (int16_t)(out > 32767 ? 32767 : out < -32768 ? -32768 : out);
 }
-*/
 
 // Sending AT commands to the U-locate module so it will go into the proper format we desire
 
@@ -276,7 +279,7 @@ void configureUloModule() {
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
   delay(300);
   pinMode(LED, OUTPUT);
 
@@ -288,9 +291,15 @@ void setup() {
   //Audio shield
 
 
-  AudioMemory(256);
+  AudioMemory(500);
   audioShield.enable();
   audioShield.volume(0.55);
+
+  // Sampling Rate Printer
+  Serial.print("Sample rate: ");
+  Serial.println(AUDIO_SAMPLE_RATE_EXACT);
+  delay(500);
+
 
   //Memory set
   memset(ringL, 0, sizeof(ringL));
@@ -346,6 +355,16 @@ void processUloMessage(uint8_t type, uint8_t *p, uint16_t len) {
 }
 
 
+void fadeBlock(int16_t *block, bool fadeIn) {
+    for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+        float gain = (float)i / AUDIO_BLOCK_SAMPLES;
+        if (!fadeIn) gain = 1.0f - gain;
+        block[i] = (int16_t)(block[i] * gain);
+    }
+}
+
+static bool wasStarved = false;
+
 
 void loop() {
   // Redundant outer getBuffer() calls removed (were causing unused variable warnings)
@@ -359,11 +378,39 @@ void loop() {
   }
   static int frameCount = 0;
   static int dropCount = 0;
+
   if (adpcm_buf_idx >= ADPCM_FRAME_BYTES) {
-    adpcm_buf_idx = 0;
-    frameCount++;
-    
-    adpcm_decode_frame(adpcm_buf, pcm_16k, &adpcm_rx_state);
+
+      // DECODING
+
+
+    if (frameCount % 50 == 0) {
+        Serial.print("Frame end:   ");
+        Serial.print(pcm_16k[125]); Serial.print(", ");
+        Serial.print(pcm_16k[126]); Serial.print(", ");
+        Serial.println(pcm_16k[127]);
+    }
+    if (frameCount % 50 == 1) {
+        Serial.print("Frame start: ");
+        Serial.print(pcm_16k[0]); Serial.print(", ");
+        Serial.print(pcm_16k[1]); Serial.print(", ");
+        Serial.println(pcm_16k[2]);
+    }
+
+    // Copy frame data before resetting index to avoid overwriting during decoding
+
+
+
+      uint8_t frame_copy[ADPCM_FRAME_BYTES];
+      memcpy(&frame_copy, adpcm_buf, ADPCM_FRAME_BYTES);
+      adpcm_buf_idx = 0;  // now safe to reset
+      frameCount++;
+
+
+    memcpy(&adpcm_rx_state.predicted, frame_copy, 2); // Initialize predicted sample with last sample of previous frame for continuity
+    memcpy(&adpcm_rx_state.step_index, frame_copy + 2, 1); // Initialize step index with last frame's value
+
+    adpcm_decode_frame(frame_copy, pcm_16k, &adpcm_rx_state);
 
 
      // Check for silence/garbage frames
@@ -371,20 +418,22 @@ void loop() {
     for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) energy += abs(pcm_16k[i]);
     if (energy == 0) dropCount++;
     
-    if (frameCount % 100 == 0) {
-        Serial.print("Frames: "); Serial.print(frameCount);
-        Serial.print(" Drops: "); Serial.println(dropCount);
-    }
+    // if (frameCount % 100 == 0) {
+    //     Serial.print("Frames: "); Serial.print(frameCount);
+    //     Serial.print(" Drops: "); Serial.println(dropCount);
+    // }
 
     // Push 160 decoded samples into pcm_ring
     for (int i = 0; i < AUDIO_FRAME_SAMPLES; i++) {
       pcm_ring[pcm_write_pos % PCM_RING_SIZE] = pcm_16k[i];
       pcm_write_pos++;
     }
+
   }
   
 
    int available = pcm_write_pos - pcm_read_pos;
+    //Serial.printf("avaliable = %d write %d Read %d Upsampled %d\n", available, pcm_write_pos, pcm_read_pos, (int)(available / resample_step));
     if (!prebuffered) {
     if (available >= PREBUFFER_SAMPLES) prebuffered = true;
     return;  // don't play yet
@@ -405,29 +454,47 @@ void loop() {
 
     
     if (blockL != NULL && blockR != NULL) {
-        if ((pcm_write_pos - pcm_read_pos) > PCM_RING_SIZE - 160) {
-            Serial.println("PCM OVERFLOW WARNING - dropping frame");
-            pcm_read_pos = pcm_write_pos - AUDIO_BLOCK_SAMPLES; // resync
-        }
-      for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
-        
 
-        int16_t dry = pcm_ring[pcm_read_pos % PCM_RING_SIZE];
-        pcm_read_pos++;
-        if( dry == 0) Serial.println("0 SIGNAL WEEWOO");
+
+      // Bit Wise step adjustment to account for slight differeences in the actual rate we are recieveing
+      static float integral_error = 0.0f;
+
+      // Inside your playback block:
+      int avail = pcm_write_pos - pcm_read_pos;
+      float error = (avail - TARGET_AVAIL) / (float)TARGET_AVAIL;
+
+      integral_error += error * 0.0001f;                          // accumulates slowly
+      integral_error = constrain(integral_error, -0.05f, 0.05f); // prevent windup
+
+      float target_step = resample_step * (1.0f + 0.05f * error + integral_error);
+      dynamic_step += 0.1f * (target_step - dynamic_step);
+      dynamic_step = constrain(dynamic_step, resample_step * 0.9f, resample_step * 1.1f);
+     
+
+
+      for (int i = 0; i < AUDIO_BLOCK_SAMPLES; i++) {
+
+
+       int16_t dry = upsample_next_cubic();
         ringL[write_pos] = dry;
         ringR[write_pos] = dry;
 
         int readL = ringIndex(write_pos - delayL_samples);
         int readR = ringIndex(write_pos - delayR_samples);
 
-        // blockL[i] = clamp16((int)(ringL[readL] * gainL_global * gainL));
-        // blockR[i] = clamp16((int)(ringR[readR] * gainR_global * gainR));
-        blockL[i] = dry; // BYPASSING SPATIALIZATION FOR TESTING
-        blockR[i] = dry; // BYPASSING SPATIALIZATION FOR TESTING
+        blockL[i] = clamp16((int)(ringL[readL] * gainL_global * gainL));
+        blockR[i] = clamp16((int)(ringR[readR] * gainR_global * gainR));
+        // blockL[i] = dry; // BYPASSING SPATIALIZATION FOR TESTING
+        // blockR[i] = dry; // BYPASSING SPATIALIZATION FOR TESTING
 
         write_pos = ringIndex(write_pos + 1);
       }
+      if (wasStarved) {
+          fadeBlock(blockL, true);   // fade in after silence
+          fadeBlock(blockR, true);
+          wasStarved = false;
+      }
+
       queueL.playBuffer();
       queueR.playBuffer();
     }
@@ -436,11 +503,20 @@ void loop() {
      prebuffered = false;  // reset if we fully drain
   }
   else {
-    static int starvCount = 0;
-    starvCount++;
-    if (starvCount % 50 == 0) {
-        //Serial.print("Buffer starvation x50, avail=");
-        //Serial.println(available);
+    int16_t *blockL = queueL.getBuffer();
+    int16_t *blockR = queueR.getBuffer();
+    if (blockL != NULL && blockR != NULL) {
+
+        memset(blockL, 0, AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+        memset(blockR, 0, AUDIO_BLOCK_SAMPLES * sizeof(int16_t));
+        if (!wasStarved) {
+            // last real block — fade it out
+            fadeBlock(blockL, false);
+            fadeBlock(blockR, false);
+            wasStarved = true;
+        }
+        queueL.playBuffer();
+        queueR.playBuffer();
     }
 }
 
@@ -529,23 +605,35 @@ void loop() {
         Serial.print(" audioMem="); Serial.println(AudioMemoryUsageMax());
         Serial.print(" PCM Ring[0]: "); Serial.print(pcm_ring[pcm_read_pos % PCM_RING_SIZE]);
     }
-    static uint32_t lastFrameTime = 0;
     // when you successfully decode a frame:
     uint32_t now = millis();
-    // Serial.print("Frame gap ms: ");
-    // Serial.println(now - lastFrameTime);
-    lastFrameTime = now;
+
+
     uint32_t gap = now - lastFrameTime;
-    lastFrameTime = now;
     framesSinceLastPrint++;
 
-    if (gap > 5) {  // only print gaps > 5ms to filter noise
-        Serial.print("Frame gap ms: ");
-        Serial.print(gap);
-        Serial.print(" frames in burst: ");
-        Serial.println(framesSinceLastPrint);
-        framesSinceLastPrint = 0;
-}
+// Print every 500ms regardless
+if (now - lastBurstTime > 500) {
+    lastFrameTime = now;
+
+    Serial.print("Frames in last 500ms: ");
+    Serial.print(framesSinceLastPrint);
+    Serial.print(", last gap ms: ");
+    Serial.println(gap);
+    framesSinceLastPrint = 0;
+    lastBurstTime = now;
+    }
+
+  static uint32_t lastRateCheck = 0;
+static int32_t lastWritePos = 0;
+
+  if (millis() - lastRateCheck > 5000) {
+      float actualRate = (pcm_write_pos - lastWritePos) / 5.0f;
+      Serial.print("Actual write rate (samples/sec): ");
+      Serial.println(actualRate);
+      lastWritePos = pcm_write_pos;
+      lastRateCheck = millis();
+  }
 
 }
 
