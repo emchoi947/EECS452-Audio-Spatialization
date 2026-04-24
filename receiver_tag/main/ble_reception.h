@@ -1,3 +1,16 @@
+/*
+Name: 
+ble_reception.h
+* 
+Authorship:
+EECS 452 W26 - Audio Spatialization
+Written by Seohyeon Choi
+*
+Description:
+
+Header file for ble_reception, declares needed UART ports and other details.
+Also declares the UUIDs matching the transmitter ESP32-H2 BLE service.
+*/
 #ifndef BLE_RECEPTION_H
 #define BLE_RECEPTION_H
 

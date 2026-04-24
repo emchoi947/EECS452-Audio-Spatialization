@@ -1,3 +1,19 @@
+/*
+Name: 
+ble_reception.c
+* 
+Authorship:
+EECS 452 W26 - Audio Spatialization
+Written by Seohyeon Choi
+*
+Description:
+
+This code initializes the BLE reception service on the receiver ESP32-H2,
+connects to the transmitter ESP32-H2 based on name, and subscribes to the notfication service.
+After notifications arrive from the transmitter with the audio signal data, this is sent to the
+Teensy over UART with sync bits added.
+*/
+
 #include "esp_log.h"
 #include "nvs_flash.h"
 /* BLE */
@@ -429,6 +445,9 @@ ble_rec_gap_event(struct ble_gap_event *event, void *arg)
     }
 }
 
+/**
+ * Next three functions are for resetting, syncing, and running the BLE task.
+ */
 static void
 ble_rec_on_reset(int reason)
 {
@@ -457,6 +476,9 @@ void ble_rec_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
+/**
+ * Initializes the Bluetooth reception service.
+ */
 void ble_reception_init(){
     /* Initialize NVS — it is used to store PHY calibration data */
     esp_err_t ret = nvs_flash_init();
