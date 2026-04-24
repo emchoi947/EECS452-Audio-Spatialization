@@ -1,3 +1,19 @@
+/*
+Name: 
+ble_reception.c
+* 
+Authorship:
+EECS 452 W26 - Audio Spatialization
+Written by Seohyeon Choi
+*
+Description:
+
+This code initializes the BLE reception service on the receiver ESP32-H2,
+connects to the transmitter ESP32-H2 based on name, and subscribes to the notfication service.
+After notifications arrive from the transmitter with the audio signal data, this is sent to the
+Teensy over UART with sync bits added.
+*/
+
 #include "esp_log.h"
 #include "nvs_flash.h"
 /* BLE */
@@ -375,12 +391,21 @@ ble_rec_gap_event(struct ble_gap_event *event, void *arg)
 
         /* Attribute data is contained in event->notify_rx.om. Use
          * `os_mbuf_copydata` to copy the data received in notification mbuf */
-        uint8_t data[84];
+        uint8_t data[256];
         int len = OS_MBUF_PKTLEN(event->notify_rx.om);
         os_mbuf_copydata(event->notify_rx.om, 0, len, data);
 
         /* Data is written to UART_PORT. */
-        uart_write_bytes(UART_PORT, (const char *)data, len);
+        // int sync1 = 0xAA;
+        // int sync2 = 0xFF;
+        // uart_write_bytes(UART_PORT, (const char *)sync1, 1);
+        // uart_write_bytes(UART_PORT, (const char *)sync2, 1);
+        // uart_write_bytes(UART_PORT, (const char *)data, len);
+        uint8_t packet[256];
+        packet[0] = 0xAA;
+        packet[1] = 0xFF;
+        memcpy(packet + 2, data, len);
+        uart_write_bytes(UART_PORT, (const char *)packet, len + 2);
         //ESP_LOG_BUFFER_HEX("BLE", data, len);
         return 0;
 
@@ -420,6 +445,9 @@ ble_rec_gap_event(struct ble_gap_event *event, void *arg)
     }
 }
 
+/**
+ * Next three functions are for resetting, syncing, and running the BLE task.
+ */
 static void
 ble_rec_on_reset(int reason)
 {
@@ -448,6 +476,9 @@ void ble_rec_host_task(void *param)
     nimble_port_freertos_deinit();
 }
 
+/**
+ * Initializes the Bluetooth reception service.
+ */
 void ble_reception_init(){
     /* Initialize NVS — it is used to store PHY calibration data */
     esp_err_t ret = nvs_flash_init();
