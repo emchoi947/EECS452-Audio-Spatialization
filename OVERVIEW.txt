@@ -2,4 +2,4 @@ The transmitter_tag files are for the transmitter ESP32-H2.
 
 The receiver_tag files are for the receiver ESP32-H2. main.c runs the initialization functions of the UART and BLE, while the ble_reception files contain the initialization codes, connection to the transmitter, subscription to the transmitter services, and receiving the Bluetooth transmitted audio from notifications, and sending it over UART to the Teensy.
 
-The Arduino_Spatialization files are for the Teensy 4.1 on the receiver side.
+The spatial_tag files are for the Teensy 4.1 on the receiver side. Compiling and flashing the spatialization_algorithm.PDE contains everything needed for the Teensy to work. It contains the spatialization algorithm, reception of the UART compressed audio data, and the AoA over UART from the UBLOX antenna array.
